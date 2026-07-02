@@ -1,0 +1,28 @@
+# Real config contains private API keys and machine-specific paths — NEVER commit.
+# Share MediaCleanup.example.toml instead.
+MediaCleanup.toml
+
+# Bundled tool binaries (users install their own MKVToolNix/FileBot/ffmpeg)
+runtimes/
+runtime/
+
+# Local working files
+backup/
+logs/
+*.log
+*.tmp
+*.mkv.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Claude Code local settings
+.claude/
