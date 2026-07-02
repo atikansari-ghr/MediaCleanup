@@ -1636,14 +1636,6 @@ def _write_tags_xml(imdb_id: Optional[str] = None, xml_text: Optional[str] = Non
     return Path(tmp)
 
 
-# Canonical output-filename stems. Once a file is named in the final convention
-# (post-FileBot / heuristic rename), the SEGMENT TITLE mirrors the full filename:
-#   Movies: The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]
-#   TV:     Show Name (2006) - S01E23 - An Episode Title - 1080p.x264 - [Hindi + English]
-_MOVIE_CANONICAL_STEM_RX = re.compile(r"^.+\(\d{4}\)(?: - tt\d{6,9})? - .+\.\d{3,4}p\..+ - \[.+\]$")
-_TV_CANONICAL_STEM_RX = re.compile(r"^.+ - S\d{1,2}E\d{1,2} - .+ - \[.+\]$")
-
-
 def _xml_esc(s: Any) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
@@ -1809,13 +1801,6 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
                 if imdb_id:
                     logging.debug("IMDB tag read from existing MKV tags: %s -> %s", mkv_path.name, imdb_id)
             segment_title = f"{title} ({year})" if year else (title or mkv_path.stem)
-
-        # Main-title format: once the filename is canonical (post-FileBot/heuristic
-        # rename), the segment title mirrors the FULL filename convention, e.g.
-        # 'The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]'.
-        stem = mkv_path.stem
-        if (_TV_CANONICAL_STEM_RX if is_tv else _MOVIE_CANONICAL_STEM_RX).match(stem):
-            segment_title = stem
 
         # --- Fetch rich metadata (TMDB primary, OMDb supplement) ---
         # Enabled whenever API keys are configured; --no-fetch-tags disables it.

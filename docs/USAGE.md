@@ -129,11 +129,11 @@ Whenever tag cleaning runs — the automatic pass after each remux **and** stand
 
 **TV** (three levels): show (70) — `TITLE`, `GENRE`, `NETWORK`, `LAW_RATING`, cast; season (60) — season title + number; episode (50) — episode title, number, `DATE_RELEASED` (airdate), `DIRECTOR`, `DESCRIPTION`/`SYNOPSIS`, `RATING`.
 
-**Segment title** (the "main title" players display) is set to the full filename convention once the file is canonically named:
+**Segment title** (the "main title" players display) stays clean — no technical suffixes:
 
 ```
-Movies: The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]
-TV:     Show Name (2006) - S01E23 - An Episode Title - 1080p.x264 - [Hindi + English]
+Movies: The Film (2021)
+TV:     Show Name (2006) - S01E23 - An Episode Title
 ```
 
 A full season costs one show lookup + one season lookup total (cached per run), regardless of episode count.
