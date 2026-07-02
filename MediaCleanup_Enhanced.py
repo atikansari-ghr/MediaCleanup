@@ -757,7 +757,8 @@ _MOVIE_NOISE_TOKENS = re.compile(
 )
 
 _YEAR_RE = re.compile(r"\((19\d{2}|20\d{2})\)|\b(19\d{2}|20\d{2})\b")
-_SEASON_EP_RE = re.compile(r"(?i)\bS(\d{1,2})E(\d{1,2})\b")
+# Accepts compact and separated forms: S01E02, S01.E02, S01 E02, S01-E02
+_SEASON_EP_RE = re.compile(r"(?i)\bS(\d{1,2})\s*[.\-_ ]?\s*E(\d{1,2})\b")
 
 
 def normalize_for_similarity(name: str) -> str:
@@ -4169,6 +4170,9 @@ def infer_tv_components(p: Path) -> Tuple[str, Optional[str], Optional[str], Opt
       Show (Year) - SxxEyy - Title
     """
     stem = p.stem.replace('.', ' ').replace('_', ' ')
+    # Drop website/release-group junk in non-year parentheses, e.g.
+    # '(SiteName Foo) Show Name S01 E02 ...' — keep '(YYYY)' groups.
+    stem = re.sub(r"\((?!\s*(?:19|20)\d{2}\s*\))[^)]*\)", " ", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
 
     # Season/Episode
@@ -4201,16 +4205,20 @@ def infer_tv_components(p: Path) -> Tuple[str, Optional[str], Optional[str], Opt
     if pm:
         show_with_year = pm.group(1).strip()
     else:
-        # fallback: take left side of " - SxxExx - " pattern
-        m3 = re.search(r"^(.+?)\s-\sS\d{1,2}E\d{1,2}\b", stem, flags=re.I)
+        # fallback: everything left of the SxxEyy marker (any separator style)
+        m3 = re.search(r"^(.+?)[\s.\-_]+S\d{1,2}\s*[.\-_ ]?\s*E\d{1,2}\b", stem, flags=re.I)
         if m3:
-            show_with_year = m3.group(1).strip()
+            show_with_year = _MOVIE_NOISE_TOKENS.sub(" ", m3.group(1))
+            show_with_year = re.sub(r"\s+", " ", show_with_year).strip()
+            show_with_year = re.sub(r"[\s.\-–—]+$", "", show_with_year).strip()
         else:
             # fallback: remove SxxExx then clean
             tmp = stem
             if m:
                 tmp = tmp[:m.start()] + tmp[m.end():]
             tmp = _MOVIE_NOISE_TOKENS.sub(" ", tmp)
+            # Noisy no-marker names: also drop language/sub markers
+            tmp = re.sub(r"(?i)\b(telugu|telegu|tamil|hindi|english|malayalam|kannada|multi|dual\s*audio|esubs?|msubs?)\b", " ", tmp)
             tmp = re.sub(r"\s+", " ", tmp).strip()
             show_with_year = tmp or parent_clean or "UnknownShow"
 
