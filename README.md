@@ -50,6 +50,9 @@ python MediaCleanup_Enhanced.py --movies --input "D:\Downloads"   :: specific fo
 python MediaCleanup_Enhanced.py --audio-langs Telugu Hindi        :: keep only these languages
 python MediaCleanup_Enhanced.py --cleantags                       :: clean tags in-place, no remux
 python MediaCleanup_Enhanced.py --coverart                        :: embed cover art in-place
+python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
+python MediaCleanup_Enhanced.py --subtitles                       :: download missing sidecar subs
+python MediaCleanup_Enhanced.py --validate-keys                   :: test all configured API keys
 python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
 ```
 

@@ -42,3 +42,14 @@ output_root = 'D:\Media\Fixed'    # remuxed output (mirrors source structure)
 tmdb_api_key     = ""
 fanarttv_api_key = ""
 omdb_api_key     = ""
+
+[subtitles]
+# OpenSubtitles.com credentials for the --subtitles mode (sidecar .srt download).
+# All three are required for downloads: https://www.opensubtitles.com/en/consumers
+# Free accounts: ~20 downloads/day; VIP: 1000/day.
+api_key  = ""
+username = ""
+password = ""
+# Languages to download (ISO 639-1). A single language saves as '<movie>.srt';
+# extra languages get a suffix like '<movie>.hin.srt'.
+languages = ["en"]

@@ -56,6 +56,16 @@ Verify your keys anytime with `python MediaCleanup_Enhanced.py --validate-keys`.
 | `fanarttv_api_key` | fanart.tv project key: <https://fanart.tv/get-an-api-key/>. Curated high-quality art; first fallback. TV lookups require `tmdb_api_key` too (TMDB translates to the TVDB ID fanart.tv uses). |
 | `omdb_api_key` | OMDb key (free tier 1,000 req/day): <https://www.omdbapi.com/apikey.aspx>. Last resort — returns a ~300px poster. |
 
+## `[subtitles]`
+
+Credentials for the `--subtitles` mode (OpenSubtitles.com REST API). All three credentials are required for downloads; without them the mode refuses to run (dry-run works regardless).
+
+| Key | Description |
+|---|---|
+| `api_key` | OpenSubtitles API key — register a consumer at <https://www.opensubtitles.com/en/consumers>. |
+| `username` / `password` | Your opensubtitles.com account login (downloads are per-user; free ≈ 20/day, VIP ≈ 1000/day). |
+| `languages` | List of ISO 639-1 codes to download, default `["en"]`. One language → sidecar named `<mkv stem>.srt`; extra languages get `.hin.srt`-style suffixes. |
+
 ---
 
 ## What stays in the script

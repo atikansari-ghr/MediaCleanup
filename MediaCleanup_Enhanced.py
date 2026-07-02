@@ -74,6 +74,13 @@ class Config:
     FANARTTV_API_KEY: str = ""
     OMDB_API_KEY: str = ""
 
+    # OpenSubtitles.com — MediaCleanup.toml [subtitles] section (--subtitles mode).
+    # All three credentials are required for downloads; languages are ISO 639-1.
+    OS_API_KEY: str = ""
+    OS_USERNAME: str = ""
+    OS_PASSWORD: str = ""
+    SUB_LANGS: Tuple[str, ...] = ("en",)
+
     # Similarity grouping for Movies (per-folder)
     SIMILARITY_THRESHOLD_DEFAULT: float = 0.88
 
@@ -173,6 +180,12 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
     filebot = data.get("filebot", {}) or {}
     paths = data.get("paths", {}) or {}
     coverart = data.get("coverart", {}) or {}
+    subtitles = data.get("subtitles", {}) or {}
+
+    sub_langs_raw = subtitles.get("languages") or ["en"]
+    if not isinstance(sub_langs_raw, list):
+        raise ConfigError(f"[subtitles] languages must be a list of ISO codes, got: {sub_langs_raw!r}")
+    sub_langs = tuple(str(x).strip().lower() for x in sub_langs_raw if str(x).strip()) or ("en",)
 
     def required(section: Dict[str, Any], section_name: str, key: str) -> str:
         v = section.get(key)
@@ -206,6 +219,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         TMDB_API_KEY=str(coverart.get("tmdb_api_key", "") or ""),
         FANARTTV_API_KEY=str(coverart.get("fanarttv_api_key", "") or ""),
         OMDB_API_KEY=str(coverart.get("omdb_api_key", "") or ""),
+        OS_API_KEY=str(subtitles.get("api_key", "") or ""),
+        OS_USERNAME=str(subtitles.get("username", "") or ""),
+        OS_PASSWORD=str(subtitles.get("password", "") or ""),
+        SUB_LANGS=sub_langs,
     )
 
 
@@ -431,7 +448,7 @@ def run_filebot_rename_mkvs(mkvs: List[Path], dry_run: bool) -> List[Path]:
         "--output", win_long_path(out_dir),
         "--action", "move",
         "--conflict", "override",
-        "--non-strict",
+        "-non-strict",
     ]
     r = run_cmd(cmd, timeout_sec=900)
     if not r.ok:
@@ -528,7 +545,7 @@ def run_filebot_rename_tv_mkv(mkv: Path, dry_run: bool) -> Path:
         "--output", win_long_path(out_dir),
         "--action", "move",
         "--conflict", "override",
-        "--non-strict",
+        "-non-strict",
     ]
 
     try:
@@ -606,12 +623,12 @@ def run_filebot_rename_final_mkv(
         "--output", win_long_path(out_dir),
         "--action", "move",
         "--conflict", "override",
-        "--non-strict",
+        "-non-strict",
     ]
     if query:
         # Override FileBot's filename-based search with a clean title so release
         # noise in the original filename doesn't corrupt the DB lookup result.
-        cmd += ["--query", query]
+        cmd += ["--q", query]
         logging.debug("FileBot query override: %s", query)
 
     r = run_cmd(cmd, timeout_sec=1200)
@@ -1182,11 +1199,15 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
         r"esub|subbed|multi|dubbed|hq|"
         r"ddp?\+?\s*\d\.\d|dd\s*\d\.\d|"
         r"eac3|ac3|aac|dts(?:-hd)?|truehd|atmos|"
+        r"(?:8|10)\s*-?\s*bit|"
         r"\d+\s*kbps|\d+\s*mbps|"
         r"\d+(?:\.\d+)?\s*(?:gb|mb)"
         r")\b"
     )
     s = junk.sub(" ", s)
+
+    # Release-group debris left behind after codec removal (e.g. 'HEVC-GRP' -> '-GRP')
+    s = re.sub(r"(?:^|\s)-[A-Za-z0-9]+\b", " ", s)
 
     # Collapse repeated hyphens / separators
     s = re.sub(r"[\-–—]{2,}", " ", s)
@@ -2458,6 +2479,23 @@ def validate_api_keys() -> Dict[str, str]:
         else:
             status["OMDb"] = "network error"
 
+    if not (CFG.OS_API_KEY and CFG.OS_USERNAME and CFG.OS_PASSWORD):
+        status["OpenSubs"] = "not configured"
+    else:
+        try:
+            payload = json.dumps({"username": CFG.OS_USERNAME, "password": CFG.OS_PASSWORD}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{_OS_API_BASE}/login", data=payload, method="POST",
+                headers={"Api-Key": CFG.OS_API_KEY, "User-Agent": _OS_USER_AGENT,
+                         "Content-Type": "application/json", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            status["OpenSubs"] = "ok" if data.get("token") else "invalid"
+        except urllib.error.HTTPError as e:
+            status["OpenSubs"] = "invalid" if e.code in (401, 403) else "network error"
+        except Exception:
+            status["OpenSubs"] = "network error"
+
     return status
 
 
@@ -2470,13 +2508,16 @@ def disable_invalid_api_keys() -> None:
     global CFG
     status = validate_api_keys()
     replace: Dict[str, str] = {}
-    key_field = {"TMDB": "TMDB_API_KEY", "fanart.tv": "FANARTTV_API_KEY", "OMDb": "OMDB_API_KEY"}
+    key_field = {"TMDB": "TMDB_API_KEY", "fanart.tv": "FANARTTV_API_KEY",
+                 "OMDb": "OMDB_API_KEY", "OpenSubs": "OS_API_KEY"}
     for source, st in status.items():
         if st == "invalid":
-            logging.warning("API key for %s is INVALID — source disabled for this run. "
-                            "Fix it in [coverart] of %s (verify with --validate-keys).",
+            logging.warning("API key/credentials for %s are INVALID — source disabled for this run. "
+                            "Fix them in %s (verify with --validate-keys).",
                             source, CONFIG_FILE.name)
-            replace[key_field[source]] = ""
+            field = key_field.get(source)
+            if field:
+                replace[field] = ""
         elif st == "network error":
             logging.warning("API key check for %s hit a network error — leaving the source enabled.", source)
     if replace:
@@ -3021,6 +3062,564 @@ def run_coverart_pipeline(
 
 
 # =========================
+# Rename mode (--rename / --rename-undo)
+# =========================
+
+RENAME_HISTORY_CSV = _SCRIPT_DIR / "logs" / "rename_history.csv"
+
+# Library-organizing formats for --rename-into (folder structure prepended).
+MOVIE_FILEBOT_FORMAT_DIR = "{n} ({y})/" + MOVIE_FILEBOT_FORMAT
+TV_FILEBOT_FORMAT_DIR = "{n} ({y})/Season {s.pad(2)}/" + TV_FILEBOT_FORMAT
+
+
+def _append_rename_history(batch_id: str, pairs: List[Tuple[Path, Path]]) -> None:
+    """Append old->new mappings to logs/rename_history.csv (creates it if missing)."""
+    if not pairs:
+        return
+    import csv
+    RENAME_HISTORY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not RENAME_HISTORY_CSV.exists()
+    try:
+        with RENAME_HISTORY_CSV.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["batch", "old", "new"])
+            for old, new in pairs:
+                w.writerow([batch_id, str(old), str(new)])
+        logging.info("Rename history: %d entries appended to %s (batch %s)",
+                     len(pairs), RENAME_HISTORY_CSV, batch_id)
+    except Exception as e:
+        logging.warning("Could not write rename history (non-fatal): %s", e)
+
+
+def run_rename_undo() -> int:
+    """
+    Revert the most recent --rename batch recorded in logs/rename_history.csv.
+    Files that moved or changed since are skipped with a warning. The undone
+    batch is removed from the history so a further undo targets the batch before.
+    """
+    import csv
+    if not RENAME_HISTORY_CSV.exists():
+        logging.error("No rename history found at %s — nothing to undo.", RENAME_HISTORY_CSV)
+        return 1
+
+    with RENAME_HISTORY_CSV.open("r", newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.reader(f) if r]
+    if len(rows) <= 1:
+        logging.error("Rename history is empty — nothing to undo.")
+        return 1
+
+    header, entries = rows[0], rows[1:]
+    last_batch = entries[-1][0]
+    batch_rows = [r for r in entries if r[0] == last_batch]
+    keep_rows = [r for r in entries if r[0] != last_batch]
+
+    logging.info("Undoing rename batch %s (%d file(s))...", last_batch, len(batch_rows))
+    reverted = skipped = 0
+    for _b, old_s, new_s in reversed(batch_rows):
+        old, new = Path(old_s), Path(new_s)
+        if not new.exists():
+            logging.warning("Skip undo (renamed file no longer exists): %s", new)
+            skipped += 1
+            continue
+        if old.exists():
+            logging.warning("Skip undo (original path is occupied): %s", old)
+            skipped += 1
+            continue
+        try:
+            old.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(win_long_path(new), win_long_path(old))
+            logging.info("Reverted: %s -> %s", new.name, old)
+            reverted += 1
+            # Prune empty folders --rename-into may have created
+            d = new.parent
+            while d != d.parent:
+                try:
+                    d.rmdir()
+                except OSError:
+                    break
+                d = d.parent
+        except Exception as e:
+            logging.warning("Undo failed for %s: %s", new, e)
+            skipped += 1
+
+    try:
+        with RENAME_HISTORY_CSV.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(header)
+            w.writerows(keep_rows)
+    except Exception as e:
+        logging.warning("Could not rewrite rename history (non-fatal): %s", e)
+
+    logging.info("Undo complete: reverted=%d skipped=%d", reverted, skipped)
+    return 0 if skipped == 0 else 1
+
+
+def process_rename_one(
+    mkv: Path,
+    is_tv: bool,
+    target_root: Optional[Path],
+    dry_run: bool,
+    force_audio_langs: Optional[Dict[int, str]] = None,
+    force_sub_langs: Optional[Dict[int, str]] = None,
+) -> Result:
+    """
+    Rename a single MKV via FileBot into the canonical naming format.
+
+    target_root=None  -> rename in place (same folder).
+    target_root=Path  -> organize into the library structure under that root
+                         (Movies: 'Title (Year)/...'; TV: 'Show (Year)/Season XX/...').
+
+    When --force-audio-lang/--force-sub-lang are given, language tags are fixed
+    via mkvpropedit BEFORE FileBot runs so the [language] bracket comes out right.
+    Dry runs use FileBot's native test action, which prints the actual proposed name.
+    """
+    kind = "rename"
+    try:
+        if not CFG.FILEBOT_EXE.exists():
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason=f"FileBot not found at {CFG.FILEBOT_EXE}")
+        if _FILEBOT_DISABLED:
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason="FileBot disabled for this run (bundled JRE problem)")
+
+        # Fix mislabeled language tags first so FileBot reads correct languages.
+        if force_audio_langs or force_sub_langs:
+            if dry_run:
+                logging.info("[DRY] Would fix language tags before rename: %s", mkv.name)
+            else:
+                meta = mkvmerge_identify_json(mkv)
+                tracks = extract_tracks(mkv, meta)
+                fix_track_langs_inplace(mkv, tracks, force_audio_langs or {}, force_sub_langs or {})
+
+        # Clean query so release noise in the filename doesn't corrupt the DB lookup.
+        if is_tv:
+            show_name, _s, _e, _t = infer_tv_components(mkv)
+            query = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip() or None
+            db = "TheTVDB"
+            fmt = TV_FILEBOT_FORMAT_DIR if target_root else TV_FILEBOT_FORMAT
+        else:
+            title, year, _imdb = parse_title_year_imdb_from_filename(mkv)
+            if not title:
+                title, year = infer_movie_name_year_from_path(mkv)
+            query = f"{title} ({year})" if title and year else (title or None)
+            db = CFG.FILEBOT_DB
+            fmt = MOVIE_FILEBOT_FORMAT_DIR if target_root else MOVIE_FILEBOT_FORMAT
+
+        out_dir = target_root if target_root else mkv.parent
+        action = "test" if dry_run else "move"
+
+        try:
+            before_size = mkv.stat().st_size
+        except Exception:
+            before_size = None
+
+        cmd = [
+            win_long_path(CFG.FILEBOT_EXE),
+            "-rename", win_long_path(mkv),
+            "--db", db,
+            "--format", fmt,
+            "--output", win_long_path(out_dir),
+            "--action", action,
+            "--conflict", "skip",
+            "-non-strict",
+        ]
+        if query:
+            cmd += ["--q", query]
+
+        r = run_cmd(cmd, timeout_sec=600)
+        out_txt = (r.out or "").strip()
+
+        if dry_run:
+            # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.
+            for line in out_txt.splitlines():
+                if "[TEST]" in line or "Skipped" in line or "Failed" in line:
+                    logging.info("[DRY] %s", line.strip())
+            if not r.ok:
+                return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                              reason=f"FileBot found no match (rc={r.rc})")
+            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
+
+        if "skipped" in out_txt.lower() and mkv.exists():
+            logging.info("Rename skipped (already named / destination exists): %s", mkv.name)
+            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                          reason="already_named")
+
+        if not r.ok and mkv.exists():
+            tail = out_txt.splitlines()[-1].strip() if out_txt else f"rc={r.rc}"
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason=f"FileBot no match: {tail}")
+
+        # File was moved — locate the result (same size, newest, under out_dir).
+        new_path: Optional[Path] = None
+        if not mkv.exists():
+            try:
+                candidates = [p for p in out_dir.rglob("*.mkv")
+                              if before_size is None or (p.exists() and p.stat().st_size == before_size)]
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                if candidates:
+                    new_path = candidates[0]
+            except Exception:
+                pass
+
+        if new_path is None:
+            if mkv.exists():
+                return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                              reason="unchanged")
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason="renamed but result file not found")
+
+        logging.info("Renamed: %s -> %s", mkv.name, new_path)
+        return Result(kind=kind, source_items=[mkv], output_path=new_path, ok=True,
+                      details={"old": str(mkv), "new": str(new_path)})
+
+    except Exception as e:
+        logging.exception("Rename failed: %s", mkv)
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False, reason=str(e))
+
+
+def run_rename_pipeline(
+    is_tv: bool,
+    scan_root: Path,
+    rename_into: bool,
+    dry_run: bool,
+    workers: int,
+    force_audio_langs: Optional[Dict[int, str]] = None,
+    force_sub_langs: Optional[Dict[int, str]] = None,
+) -> List[Result]:
+    """FileBot-rename every MKV under scan_root. In-place unless rename_into."""
+    targets = scan_mkvs(scan_root)
+    logging.info("rename - %s: %d MKV(s) found in %s.%s",
+                 "TV" if is_tv else "Movies", len(targets), scan_root,
+                 " (organizing into library)" if rename_into else " (in-place)")
+
+    target_root: Optional[Path] = None
+    if rename_into:
+        target_root = CFG.TV_ROOT if is_tv else CFG.MOVIES_ROOT
+
+    results: List[Result] = []
+    # FileBot holds a per-invocation lock on its cache; parallel invocations can
+    # contend. Cap rename concurrency at 2 regardless of --workers.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, max(1, workers))) as ex:
+        futs = {
+            ex.submit(process_rename_one, p, is_tv, target_root, dry_run,
+                      force_audio_langs, force_sub_langs): p
+            for p in targets
+        }
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                p = futs[fut]
+                logging.exception("rename worker crashed: %s", p)
+                results.append(Result(kind="rename", source_items=[p], output_path=None,
+                                      ok=False, reason=f"Worker exception: {e}"))
+
+    if not dry_run:
+        pairs = [(Path(r.details["old"]), Path(r.details["new"]))
+                 for r in results if r.ok and r.details.get("old") and r.details.get("new")]
+        batch_id = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        _append_rename_history(batch_id, pairs)
+        if pairs:
+            logging.info("Undo this batch anytime with: --rename-undo")
+
+    return results
+
+
+# =========================
+# Subtitle downloading (--subtitles mode, OpenSubtitles.com REST API)
+# =========================
+
+_OS_API_BASE = "https://api.opensubtitles.com/api/v1"
+# OpenSubtitles requires a descriptive User-Agent identifying the app.
+_OS_USER_AGENT = "MediaCleanup v1.0"
+
+# ISO 639-1 <-> 639-2 for the sidecar suffix and embedded-track comparison.
+_ISO1_TO_ISO2 = {"en": "eng", "hi": "hin", "te": "tel", "ta": "tam", "ml": "mal", "kn": "kan"}
+
+
+def compute_oshash(path: Path) -> Optional[str]:
+    """
+    Classic OpenSubtitles moviehash: filesize + 64-bit sums of the first and
+    last 64 KiB. The strongest match signal — it identifies the exact release.
+    """
+    try:
+        chunk = 65536
+        size = path.stat().st_size
+        if size < chunk * 2:
+            return None
+        h = size
+        with path.open("rb") as f:
+            for _ in range(chunk // 8):
+                h = (h + int.from_bytes(f.read(8), "little")) & 0xFFFFFFFFFFFFFFFF
+            f.seek(size - chunk)
+            for _ in range(chunk // 8):
+                h = (h + int.from_bytes(f.read(8), "little")) & 0xFFFFFFFFFFFFFFFF
+        return f"{h:016x}"
+    except Exception as e:
+        logging.debug("oshash failed for %s: %s", path, e)
+        return None
+
+
+def subtitle_sidecar_path(mkv: Path, lang_iso1: str) -> Path:
+    """
+    Sidecar naming: with a single configured language (or for English), the
+    sidecar is '<mkv stem>.srt' exactly. Additional languages get an ISO 639-2
+    suffix so they can coexist: '<stem>.hin.srt'.
+    """
+    single = len(CFG.SUB_LANGS) == 1
+    if single or lang_iso1 == "en":
+        return mkv.with_suffix(".srt")
+    iso2 = _ISO1_TO_ISO2.get(lang_iso1, lang_iso1)
+    return mkv.with_suffix(f".{iso2}.srt")
+
+
+def missing_subtitle_langs(mkv: Path, tracks: List[Track]) -> List[str]:
+    """
+    Return configured languages not already covered by an embedded subtitle
+    track or an existing sidecar file.
+    """
+    embedded: set[str] = set()
+    for t in tracks:
+        if t.type == "subtitles":
+            embedded.add((t.language or "und")[:2].lower())
+
+    missing: List[str] = []
+    for lang in CFG.SUB_LANGS:
+        if lang in embedded:
+            continue
+        if subtitle_sidecar_path(mkv, lang).exists():
+            continue
+        missing.append(lang)
+    return missing
+
+
+class SubtitleFetcher:
+    """
+    OpenSubtitles.com REST client. Thread-safe; logs in once (JWT), searches by
+    moviehash + IMDB id, downloads best match, and stops the whole run
+    gracefully when the daily download quota is exhausted.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._token: Optional[str] = None
+        self._login_failed = False
+        self.quota_exhausted = False
+        self.remaining: Optional[int] = None
+
+    def _headers(self, with_auth: bool = False) -> Dict[str, str]:
+        h = {"Api-Key": CFG.OS_API_KEY, "User-Agent": _OS_USER_AGENT,
+             "Content-Type": "application/json", "Accept": "application/json"}
+        if with_auth and self._token:
+            h["Authorization"] = f"Bearer {self._token}"
+        return h
+
+    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None,
+                 with_auth: bool = False) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        url = f"{_OS_API_BASE}{path}"
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        try:
+            req = urllib.request.Request(url, data=data, method=method,
+                                         headers=self._headers(with_auth))
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            logging.debug("OpenSubtitles %s %s -> %s %s", method, path, e.code, body)
+            return e.code, None
+        except Exception as e:
+            logging.debug("OpenSubtitles %s %s failed: %s", method, path, e)
+            return None, None
+
+    def _ensure_login(self) -> bool:
+        with self._lock:
+            if self._token:
+                return True
+            if self._login_failed:
+                return False
+            code, data = self._request("POST", "/login",
+                                       {"username": CFG.OS_USERNAME, "password": CFG.OS_PASSWORD})
+            if code == 200 and data and data.get("token"):
+                self._token = data["token"]
+                user = data.get("user") or {}
+                allowed = user.get("allowed_downloads")
+                logging.info("OpenSubtitles login OK (level=%s, allowed downloads/day=%s)",
+                             user.get("level", "?"), allowed)
+                return True
+            self._login_failed = True
+            logging.error("OpenSubtitles login failed (HTTP %s) — check [subtitles] "
+                          "username/password/api_key in %s", code, CONFIG_FILE.name)
+            return False
+
+    def search_best(self, mkv: Path, imdb_id: Optional[str], lang_iso1: str) -> Optional[int]:
+        """Return the best matching subtitle file_id, or None."""
+        params = [f"languages={lang_iso1}"]
+        oshash = compute_oshash(mkv)
+        if oshash:
+            params.append(f"moviehash={oshash}")
+        if imdb_id:
+            params.append(f"imdb_id={imdb_id.lstrip('tT')}")
+        if not oshash and not imdb_id:
+            # Last resort: query by cleaned filename
+            title, _year = infer_movie_name_year_from_path(mkv)
+            if not title:
+                return None
+            params.append(f"query={urllib.parse.quote(title)}")
+
+        code, data = self._request("GET", f"/subtitles?{'&'.join(params)}")
+        items = (data or {}).get("data") or []
+        if not items:
+            return None
+
+        def rank(it: Dict[str, Any]) -> Tuple[int, int, int]:
+            a = it.get("attributes") or {}
+            return (0 if a.get("moviehash_match") else 1,
+                    0 if a.get("from_trusted") else 1,
+                    -int(a.get("download_count") or 0))
+
+        for it in sorted(items, key=rank):
+            files = (it.get("attributes") or {}).get("files") or []
+            if files and files[0].get("file_id"):
+                return int(files[0]["file_id"])
+        return None
+
+    def download(self, file_id: int) -> Optional[bytes]:
+        """Download one subtitle; tracks remaining quota from the response."""
+        if self.quota_exhausted or not self._ensure_login():
+            return None
+        code, data = self._request("POST", "/download", {"file_id": file_id}, with_auth=True)
+        if code == 406 or (data and isinstance(data.get("remaining"), int) and data["remaining"] < 0):
+            self.quota_exhausted = True
+            logging.warning("OpenSubtitles daily download quota EXHAUSTED — remaining files skipped. "
+                            "Quota resets in ~24h (UTC).")
+            return None
+        if not data or not data.get("link"):
+            return None
+        if isinstance(data.get("remaining"), int):
+            self.remaining = data["remaining"]
+            if self.remaining <= 0:
+                self.quota_exhausted = True
+        return _http_get_bytes(data["link"])
+
+
+def process_subtitles_one(mkv: Path, is_tv: bool, fetcher: SubtitleFetcher, dry_run: bool) -> Result:
+    """
+    Download missing subtitles for one MKV as sidecar .srt files.
+      1. Skip languages already covered (embedded track or existing sidecar).
+      2. Search by moviehash + IMDB id (best-ranked result wins).
+      3. Save as '<mkv stem>.srt' (extra languages get .<iso2>.srt suffix).
+    """
+    kind = "subtitles"
+    try:
+        meta = mkvmerge_identify_json(mkv)
+        tracks = extract_tracks(mkv, meta)
+        missing = missing_subtitle_langs(mkv, tracks)
+        if not missing:
+            logging.debug("Subtitles already covered, skipping: %s", mkv.name)
+            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                          reason="already_covered")
+
+        if dry_run:
+            logging.info("[DRY] Would search subtitles for %s: langs=%s", mkv.name, missing)
+            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
+
+        if fetcher.quota_exhausted:
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason="quota_exhausted")
+
+        imdb_id = (extract_imdb_id_from_tv_path(mkv) if is_tv
+                   else extract_imdb_id_from_movie_path(mkv)) or extract_imdb_from_mkv_tags(mkv)
+
+        got: List[str] = []
+        for lang in missing:
+            file_id = fetcher.search_best(mkv, imdb_id, lang)
+            if file_id is None:
+                logging.info("No %s subtitle found for: %s", lang, mkv.name)
+                continue
+            data = fetcher.download(file_id)
+            if data is None:
+                if fetcher.quota_exhausted:
+                    break
+                logging.warning("Subtitle download failed (%s): %s", lang, mkv.name)
+                continue
+            dst = subtitle_sidecar_path(mkv, lang)
+            dst.write_bytes(data)
+            got.append(lang)
+            logging.info("Subtitle saved (%s%s): %s",
+                         lang,
+                         f", quota left: {fetcher.remaining}" if fetcher.remaining is not None else "",
+                         dst.name)
+
+        if got:
+            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                          details={"langs": got})
+        if fetcher.quota_exhausted:
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason="quota_exhausted")
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                      reason=f"no subtitles found ({', '.join(missing)})")
+
+    except Exception as e:
+        logging.exception("Subtitles failed: %s", mkv.name)
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False, reason=str(e))
+
+
+def run_subtitles_pipeline(
+    do_movies: bool,
+    do_tv: bool,
+    dry_run: bool,
+    workers: int,
+    movies_root: Optional[Path] = None,
+    tv_root: Optional[Path] = None,
+) -> List[Result]:
+    """Scan Movies/TV roots and download missing sidecar subtitles."""
+    movies_root = movies_root or CFG.MOVIES_ROOT
+    tv_root = tv_root or CFG.TV_ROOT
+
+    if not dry_run and not (CFG.OS_API_KEY and CFG.OS_USERNAME and CFG.OS_PASSWORD):
+        logging.error("--subtitles requires api_key, username, and password in the "
+                      "[subtitles] section of %s.", CONFIG_FILE.name)
+        return [Result(kind="subtitles", source_items=[], output_path=None, ok=False,
+                       reason="missing OpenSubtitles credentials")]
+
+    movie_set: set[Path] = set(scan_mkvs(movies_root)) if do_movies else set()
+    tv_set: set[Path] = set(scan_mkvs(tv_root)) if do_tv else set()
+    if do_movies:
+        logging.info("subtitles - Movies: %d MKV(s) found in %s.", len(movie_set), movies_root)
+    if do_tv:
+        logging.info("subtitles - TV: %d MKV(s) found in %s.", len(tv_set), tv_root)
+
+    tagged: List[Tuple[Path, bool]] = []
+    for p in sorted(movie_set | tv_set):
+        if p in movie_set and p in tv_set:
+            is_tv = bool(_SEASON_EP_RE.search(p.stem))
+        else:
+            is_tv = p in tv_set
+        tagged.append((p, is_tv))
+
+    fetcher = SubtitleFetcher()
+    results: List[Result] = []
+    # Keep concurrency low: the API rate-limits, and quota is a shared resource.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, max(1, workers))) as ex:
+        futs = {ex.submit(process_subtitles_one, p, is_tv, fetcher, dry_run): p
+                for p, is_tv in tagged}
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                p = futs[fut]
+                logging.exception("subtitles worker crashed: %s", p)
+                results.append(Result(kind="subtitles", source_items=[p], output_path=None,
+                                      ok=False, reason=f"Worker exception: {e}"))
+    return results
+
+
+# =========================
 # Movie processing - ENHANCED
 # =========================
 
@@ -3346,6 +3945,8 @@ def process_movie_group(
                 src_file = group[0]
                 out_done = src_file
                 if not dry_run:
+                    # In-place path: working copies aren't needed — remove them.
+                    cleanup_working_copies(work_files, dry_run=False)
                     _single_tracks = metas[list(metas.keys())[0]][0]
                     fix_track_langs_inplace(src_file, _single_tracks, force_audio_langs or {}, force_sub_langs or {})
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
@@ -3374,6 +3975,8 @@ def process_movie_group(
                              src_file.name, _actual_audio_count, selected_audio_langs)
                 out_done = src_file
                 if not dry_run:
+                    # In-place path: working copies aren't needed — remove them.
+                    cleanup_working_copies(work_files, dry_run=False)
                     _single_tracks = metas[list(metas.keys())[0]][0]
                     fix_track_langs_inplace(src_file, _single_tracks, force_audio_langs or {}, force_sub_langs or {})
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
@@ -3403,6 +4006,21 @@ def process_movie_group(
             logging.info("movie: file has %d audio tracks total, %d are target langs — remuxing to strip extras.",
                          _actual_audio_count, _total_target_audio_count)
         # ─────────────────────────────────────────────────────────────────────
+
+        # SAFETY (multi-file groups): if the sources have audio but NONE of it was
+        # detected as a target language, a merge would produce a video-only file.
+        # Refuse instead — mislabeled 'und' tracks should be fixed with
+        # --force-audio-lang first.
+        if len(group) > 1:
+            _any_audio = any(
+                t.type == "audio" and not is_excluded_audio(t)
+                for tracks_, _fs in metas.values() for t in tracks_
+            )
+            if _any_audio and not audios:
+                return Result(
+                    kind=kind, source_items=group, output_path=None, ok=False,
+                    reason=("no target-language audio detected across group — merging would drop "
+                            "ALL audio; fix language tags with --force-audio-lang and retry"))
 
         out_name = build_movie_output_name(movie_name, year, imdb_id, res_tag, source_tag, codec_tag, selected_audio_langs)
 
@@ -3960,9 +4578,24 @@ def main() -> int:
                          "[coverart] section of MediaCleanup.toml). Uses --movies/--tv/--input scope flags.")
     ap.add_argument("--coverart-overwrite", action="store_true",
                     help="With --coverart: replace existing embedded cover art instead of skipping the file.")
+    ap.add_argument("--rename", action="store_true",
+                    help="Standalone mode: rename MKVs into the canonical naming format via FileBot "
+                         "(no remux, no tag changes unless --force-*-lang is given). Requires exactly "
+                         "one of --movies or --tv, plus --input for the folder to scan. In-place by "
+                         "default; see --rename-into. Every rename is logged for --rename-undo.")
+    ap.add_argument("--rename-into", action="store_true",
+                    help="With --rename: move files into the library structure under MOVIES_ROOT/TV_ROOT "
+                         "(Movies: 'Title (Year)/...'; TV: 'Show (Year)/Season XX/...').")
+    ap.add_argument("--rename-undo", action="store_true",
+                    help="Revert the most recent --rename batch recorded in logs/rename_history.csv, then exit.")
+    ap.add_argument("--subtitles", action="store_true",
+                    help="Standalone mode: download missing subtitles from OpenSubtitles.com as sidecar "
+                         ".srt files (no remux). Languages come from [subtitles] in MediaCleanup.toml "
+                         "(default: English). Skips files that already have the language embedded or as "
+                         "a sidecar. Uses --movies/--tv/--input scope flags.")
     ap.add_argument("--validate-keys", action="store_true",
-                    help="Test the API keys in the [coverart] section of MediaCleanup.toml with one "
-                         "cheap call each (TMDB, fanart.tv, OMDb), print a verdict per key, and exit. "
+                    help="Test the API keys in MediaCleanup.toml with one cheap call each "
+                         "(TMDB, fanart.tv, OMDb, OpenSubtitles), print a verdict per key, and exit. "
                          "Exit code 1 if any configured key is invalid.")
     ap.add_argument("--no-fetch-tags", action="store_true",
                     help="Disable rich metadata tagging (genre/director/actors/synopsis from TMDB+OMDb) "
@@ -4061,9 +4694,17 @@ def main() -> int:
         logging.error("--input path does not exist: %s", input_override)
         return 2
 
-    if args.cleantags and args.coverart:
-        logging.error("Invalid arguments: --cleantags and --coverart are separate modes; run them one at a time.")
+    # Standalone modes are mutually exclusive.
+    modes = [m for m, on in (("--cleantags", args.cleantags), ("--coverart", args.coverart),
+                             ("--rename", args.rename), ("--subtitles", args.subtitles),
+                             ("--rename-undo", args.rename_undo)) if on]
+    if len(modes) > 1:
+        logging.error("Invalid arguments: %s are separate modes; run them one at a time.", " and ".join(modes))
         return 2
+
+    # --rename-undo needs nothing else — do it and exit.
+    if args.rename_undo:
+        return run_rename_undo()
 
     # mkvpropedit is needed for cleantags (standalone or auto after remux) and for --coverart.
     # Skip validation failure if mkvpropedit is absent and --skip-cleantags was set.
@@ -4092,6 +4733,15 @@ def main() -> int:
         else:
             do_movies, do_tv = True, True
 
+    # SAFETY: --input with both pipelines active would point Movies AND TV at the
+    # same folder — every file would be processed twice, concurrently. Require an
+    # explicit choice instead.
+    if input_override and do_movies and do_tv:
+        logging.error("--input requires exactly one of --movies or --tv "
+                      "(otherwise every file in %s would be processed twice, once per pipeline).",
+                      input_override)
+        return 2
+
     # Resolve effective roots (--input overrides per pipeline)
     if input_override:
         movies_root = input_override if do_movies else CFG.MOVIES_ROOT
@@ -4119,6 +4769,58 @@ def main() -> int:
                 if not r.ok:
                     logging.error("  FAILED: %s | %s", r.source_items[0].name if r.source_items else "?", r.reason)
         return 0 if bad_ct == 0 else 1
+
+    # --rename standalone: FileBot-rename every MKV in scope, then exit.
+    if args.rename:
+        if do_movies == do_tv:
+            logging.error("--rename requires exactly one of --movies or --tv "
+                          "(the two use different databases and naming formats).")
+            return 2
+        is_tv_mode = do_tv
+        scan_root = tv_root if is_tv_mode else movies_root
+        rn_results = run_rename_pipeline(
+            is_tv=is_tv_mode,
+            scan_root=scan_root,
+            rename_into=args.rename_into,
+            dry_run=args.dry_run,
+            workers=args.workers,
+            force_audio_langs=force_audio_langs,
+            force_sub_langs=force_sub_langs,
+        )
+        ok_rn = sum(1 for r in rn_results if r.ok)
+        bad_rn = sum(1 for r in rn_results if not r.ok)
+        renamed = sum(1 for r in rn_results if r.ok and r.details.get("new"))
+        logging.info("rename summary: total=%d renamed=%d OK=%d failed=%d",
+                     len(rn_results), renamed, ok_rn, bad_rn)
+        if bad_rn:
+            for r in rn_results:
+                if not r.ok:
+                    logging.error("  FAILED: %s | %s",
+                                  r.source_items[0].name if r.source_items else "?", r.reason)
+        return 0 if bad_rn == 0 else 1
+
+    # --subtitles standalone: download missing sidecar subs, then exit.
+    if args.subtitles:
+        st_results = run_subtitles_pipeline(
+            do_movies=do_movies,
+            do_tv=do_tv,
+            dry_run=args.dry_run,
+            workers=args.workers,
+            movies_root=movies_root,
+            tv_root=tv_root,
+        )
+        ok_st = sum(1 for r in st_results if r.ok)
+        bad_st = sum(1 for r in st_results if not r.ok)
+        covered = sum(1 for r in st_results if r.ok and r.reason == "already_covered")
+        quota = sum(1 for r in st_results if not r.ok and r.reason == "quota_exhausted")
+        logging.info("subtitles summary: total=%d OK=%d (already covered: %d) failed=%d (quota-blocked: %d)",
+                     len(st_results), ok_st, covered, bad_st, quota)
+        if bad_st:
+            for r in st_results:
+                if not r.ok and r.reason != "quota_exhausted":
+                    logging.error("  FAILED: %s | %s",
+                                  r.source_items[0].name if r.source_items else "?", r.reason)
+        return 0 if bad_st == 0 else 1
 
     # --coverart standalone: scan roots, embed cover art in-place, then exit.
     if args.coverart:

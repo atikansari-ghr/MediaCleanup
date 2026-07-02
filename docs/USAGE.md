@@ -47,7 +47,7 @@ python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi --force-sub-lang
 |---|---|
 | `--movies` | Process the Movies pipeline only. Default (no flag): both. |
 | `--tv` | Process the TV pipeline only. Default (no flag): both. |
-| `--input PATH` | Override the scan root. With `--movies` replaces the movies root; with `--tv` the TV root; with both/neither, applies to both. Also scopes `--cleantags` and `--coverart`. |
+| `--input PATH` | Override the scan root. **Requires exactly one of `--movies`/`--tv`** (safety: pointing both pipelines at one folder would process every file twice). Also scopes `--cleantags`, `--coverart`, `--rename`, and `--subtitles`. |
 
 ### Modes
 
@@ -57,7 +57,11 @@ python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi --force-sub-lang
 | `--cleantags` | Standalone: clean promotional/watermark tags in-place on every MKV in scope. No remux. When API keys are configured, also embeds rich metadata — see [Metadata tags](#metadata-tags) below. |
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
-| `--validate-keys` | Test each API key in `[coverart]` with one cheap call, print a verdict per source, exit (code 1 if any configured key is invalid). |
+| `--rename` | Standalone: FileBot-rename every MKV in scope into the canonical format. Requires exactly one of `--movies`/`--tv`. See [Renaming downloads](#renaming-downloads). |
+| `--rename-into` | With `--rename`: move files into the library structure under the configured roots. |
+| `--rename-undo` | Revert the most recent `--rename` batch, then exit. |
+| `--subtitles` | Standalone: download missing subtitles from OpenSubtitles.com as sidecar `.srt` files. See [Subtitles](#subtitles). |
+| `--validate-keys` | Test each configured API key (TMDB, fanart.tv, OMDb, OpenSubtitles) with one cheap call, print a verdict per source, exit (code 1 if any configured key is invalid). |
 | `--no-fetch-tags` | Disable rich metadata tagging; tag cleaning reverts to basic (title + IMDB id only). |
 | `--self-check` | Validate tool paths, folder access, and API keys; parse a sample MKV; exit. |
 
@@ -150,6 +154,53 @@ python MediaCleanup_Enhanced.py --cleantags --no-fetch-tags --input "D:\Media\Fi
 ```
 
 > Note: Plex/Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC/MPC-HC/Kodi and archival self-containment — the file carries its metadata forever, independent of any server.
+
+---
+
+## Renaming downloads
+
+`--rename` fixes badly-named downloads via FileBot without remuxing or touching tags:
+
+```bat
+:: Preview (FileBot's test mode shows the actual proposed names)
+python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads" --dry-run
+
+:: Rename in place
+python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads"
+
+:: Rename AND organize into the library (Movies\Title (Year)\..., TV\Show\Season XX\...)
+python MediaCleanup_Enhanced.py --rename --tv --input "D:\Downloads\Show.S01.Complete" --rename-into
+
+:: Fix mislabeled 'und' audio first so the [language] bracket comes out right
+python MediaCleanup_Enhanced.py --rename --tv --input "D:\Downloads\Show" --force-audio-lang 1 Hindi
+
+:: Changed your mind? Revert the last batch
+python MediaCleanup_Enhanced.py --rename-undo
+```
+
+Details: requires exactly one of `--movies`/`--tv` (different databases + formats); the DB lookup uses a cleaned title query so release junk in the filename doesn't mislead it; every rename is appended to `logs\rename_history.csv`; `--rename-undo` reverts the most recent batch (skipping files that moved since) and removes it from the history. Note the language bracket in the new name reflects the audio tags *inside* the file — fix `und` tracks with the force flags or the bracket may be wrong.
+
+---
+
+## Subtitles
+
+`--subtitles` downloads missing subtitles from OpenSubtitles.com as **sidecar `.srt` files** — no remux, media streams untouched. Requires `api_key`, `username`, and `password` in the `[subtitles]` TOML section (free account ≈ 20 downloads/day, VIP ≈ 1000/day; the log shows your remaining quota after each download and the run stops gracefully when it's exhausted).
+
+- **Naming**: single configured language → exact MKV stem + `.srt` (`The Film (2021) - tt1234567 - ... - [Hindi + English + Telugu].srt`). Extra languages get a suffix: `.hin.srt`, `.tel.srt`.
+- **Languages**: `[subtitles] languages = ["en"]` (ISO 639-1; English is the default).
+- **Skips** files already covered — embedded subtitle track in the wanted language OR an existing sidecar.
+- **Matching**: file hash (identifies the exact release — best sync) + IMDB ID, ranked by hash-match → trusted uploader → download count.
+
+```bat
+:: See what's missing (offline, no quota spent)
+python MediaCleanup_Enhanced.py --subtitles --dry-run
+
+:: Download for one show
+python MediaCleanup_Enhanced.py --subtitles --tv --input "D:\Media\TV\Show Name (2006)"
+
+:: Whole library
+python MediaCleanup_Enhanced.py --subtitles
+```
 
 ---
 
