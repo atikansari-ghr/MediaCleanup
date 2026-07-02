@@ -273,6 +273,9 @@ The cover is a standard Matroska attachment named `cover.jpg`. Some players cach
 **FileBot not renaming**
 FileBot is optional. If its bundled JRE is missing/corrupt, the script auto-disables it for the run and falls back to heuristic naming. Check `[filebot] exe` in the TOML.
 
+**FileBot fails with "Unable to establish loopback connection"**
+FileBot's Java runtime creates internal sockets in the `TEMP` directory, which has a ~108-character path limit. If your `TEMP`/`TMP` environment variable points at a very long path, every FileBot lookup fails with this error. Fix: point `TEMP` at a short path for the session (`set TEMP=C:\Windows\Temp`) or permanently in Windows settings.
+
 **mkvpropedit warnings (rc=1)**
 Non-fatal — mkvpropedit exits 1 when a property being deleted doesn't exist. Changes still apply.
 

@@ -439,13 +439,15 @@ def run_filebot_rename_mkvs(mkvs: List[Path], dry_run: bool) -> List[Path]:
 
     before = [(p, p.stat().st_size) for p in mkvs]
 
+    # Plain str() paths: the FileBot launcher cannot locate its bundled JRE when
+    # invoked via a \\?\-prefixed path ("bundled JRE missing or corrupted" error).
     cmd = [
-        win_long_path(CFG.FILEBOT_EXE),
+        str(CFG.FILEBOT_EXE),
         "-rename",
-        *[win_long_path(p) for p in mkvs],
+        *[str(p) for p in mkvs],
         "--db", CFG.FILEBOT_DB,
         "--format", "{n} ({y}) - {imdbid}",
-        "--output", win_long_path(out_dir),
+        "--output", str(out_dir),
         "--action", "move",
         "--conflict", "override",
         "-non-strict",
@@ -537,12 +539,13 @@ def run_filebot_rename_tv_mkv(mkv: Path, dry_run: bool) -> Path:
     except Exception:
         before_size = None
 
+    # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths.
     cmd = [
-        win_long_path(CFG.FILEBOT_EXE),
-        "-rename", win_long_path(mkv),
+        str(CFG.FILEBOT_EXE),
+        "-rename", str(mkv),
         "--db", "TheTVDB",
         "--format", TV_BASE_FORMAT,
-        "--output", win_long_path(out_dir),
+        "--output", str(out_dir),
         "--action", "move",
         "--conflict", "override",
         "-non-strict",
@@ -615,12 +618,13 @@ def run_filebot_rename_final_mkv(
     except Exception:
         before_size = None
 
+    # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths.
     cmd = [
-        win_long_path(CFG.FILEBOT_EXE),
-        "-rename", win_long_path(mkv),
+        str(CFG.FILEBOT_EXE),
+        "-rename", str(mkv),
         "--db", db,
         "--format", filebot_format,
-        "--output", win_long_path(out_dir),
+        "--output", str(out_dir),
         "--action", "move",
         "--conflict", "override",
         "-non-strict",
@@ -3214,12 +3218,14 @@ def process_rename_one(
         except Exception:
             before_size = None
 
+        # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths
+        # ("bundled JRE missing or corrupted" error).
         cmd = [
-            win_long_path(CFG.FILEBOT_EXE),
-            "-rename", win_long_path(mkv),
+            str(CFG.FILEBOT_EXE),
+            "-rename", str(mkv),
             "--db", db,
             "--format", fmt,
-            "--output", win_long_path(out_dir),
+            "--output", str(out_dir),
             "--action", action,
             "--conflict", "skip",
             "-non-strict",
@@ -3232,13 +3238,16 @@ def process_rename_one(
 
         if dry_run:
             # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.
+            # NOTE: --action test exits with rc=1 even on success (no files were
+            # actually renamed), so success is judged from the output, not rc.
             for line in out_txt.splitlines():
                 if "[TEST]" in line or "Skipped" in line or "Failed" in line:
                     logging.info("[DRY] %s", line.strip())
-            if not r.ok:
-                return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
-                              reason=f"FileBot found no match (rc={r.rc})")
-            return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
+            if "[TEST]" in out_txt or "skipped" in out_txt.lower():
+                return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
+            tail = out_txt.splitlines()[-1].strip() if out_txt else f"rc={r.rc}"
+            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                          reason=f"FileBot found no match: {tail}")
 
         if "skipped" in out_txt.lower() and mkv.exists():
             logging.info("Rename skipped (already named / destination exists): %s", mkv.name)
