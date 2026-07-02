@@ -54,10 +54,12 @@ python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi --force-sub-lang
 | Flag | Meaning |
 |---|---|
 | *(none)* | Normal pipeline: group, select tracks, remux, tag-clean, rename. |
-| `--cleantags` | Standalone: clean promotional/watermark tags in-place on every MKV in scope. No remux. |
+| `--cleantags` | Standalone: clean promotional/watermark tags in-place on every MKV in scope. No remux. When API keys are configured, also embeds rich metadata — see [Metadata tags](#metadata-tags) below. |
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
-| `--self-check` | Validate tool paths and folder access, parse a sample MKV, exit. |
+| `--validate-keys` | Test each API key in `[coverart]` with one cheap call, print a verdict per source, exit (code 1 if any configured key is invalid). |
+| `--no-fetch-tags` | Disable rich metadata tagging; tag cleaning reverts to basic (title + IMDB id only). |
+| `--self-check` | Validate tool paths, folder access, and API keys; parse a sample MKV; exit. |
 
 ### Remux options
 
@@ -116,6 +118,38 @@ python MediaCleanup_Enhanced.py --coverart --dry-run --verbose
 ```
 
 To hand-pick art for one movie: drop a `poster.jpg` in its folder and run `--coverart` (with `--coverart-overwrite` if a cover is already embedded).
+
+---
+
+## Metadata tags
+
+Whenever tag cleaning runs — the automatic pass after each remux **and** standalone `--cleantags` — the script fetches full metadata (TMDB primary, OMDb supplement) and embeds it as standard Matroska tags, provided API keys are configured. Disable with `--no-fetch-tags`; without keys (or offline/`--dry-run`) it silently falls back to basic tags (title + IMDB id).
+
+**Movies** (tag level 50): `TITLE`, `DATE_RELEASED`, `GENRE`, `DIRECTOR`, `WRITTEN_BY`, `ACTOR` (top 10, each with nested `CHARACTER`), `DESCRIPTION` (tagline/short), `SYNOPSIS` (full plot), `LAW_RATING` (PG-13…), `RATING` (IMDB score), `IMDB`, `TMDB` — plus a collection tag (level 70) for franchise movies.
+
+**TV** (three levels): show (70) — `TITLE`, `GENRE`, `NETWORK`, `LAW_RATING`, cast; season (60) — season title + number; episode (50) — episode title, number, `DATE_RELEASED` (airdate), `DIRECTOR`, `DESCRIPTION`/`SYNOPSIS`, `RATING`.
+
+**Segment title** (the "main title" players display) is set to the full filename convention once the file is canonically named:
+
+```
+Movies: The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]
+TV:     Show Name (2006) - S01E23 - An Episode Title - 1080p.x264 - [Hindi + English]
+```
+
+A full season costs one show lookup + one season lookup total (cached per run), regardless of episode count.
+
+```bat
+:: Verify keys first
+python MediaCleanup_Enhanced.py --validate-keys
+
+:: Enrich an already-processed library
+python MediaCleanup_Enhanced.py --cleantags --input "D:\Media\Fixed"
+
+:: Clean tags the old way (offline, no metadata)
+python MediaCleanup_Enhanced.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
+```
+
+> Note: Plex/Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC/MPC-HC/Kodi and archival self-containment — the file carries its metadata forever, independent of any server.
 
 ---
 

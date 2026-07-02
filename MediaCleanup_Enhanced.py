@@ -1619,13 +1619,14 @@ def _build_tags_xml(imdb_id: Optional[str] = None) -> str:
     )
 
 
-def _write_tags_xml(imdb_id: Optional[str] = None) -> Path:
-    """Write a Matroska tags XML to a temp file and return its path."""
+def _write_tags_xml(imdb_id: Optional[str] = None, xml_text: Optional[str] = None) -> Path:
+    """Write a Matroska tags XML to a temp file and return its path.
+    xml_text overrides the default minimal (IMDB-only) document."""
     import tempfile
     fd, tmp = tempfile.mkstemp(suffix=".xml", prefix="mkvtags_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(_build_tags_xml(imdb_id))
+            f.write(xml_text if xml_text is not None else _build_tags_xml(imdb_id))
     except Exception:
         try:
             os.close(fd)
@@ -1633,6 +1634,124 @@ def _write_tags_xml(imdb_id: Optional[str] = None) -> Path:
             pass
         raise
     return Path(tmp)
+
+
+# Canonical output-filename stems. Once a file is named in the final convention
+# (post-FileBot / heuristic rename), the SEGMENT TITLE mirrors the full filename:
+#   Movies: The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]
+#   TV:     Show Name (2006) - S01E23 - An Episode Title - 1080p.x264 - [Hindi + English]
+_MOVIE_CANONICAL_STEM_RX = re.compile(r"^.+\(\d{4}\)(?: - tt\d{6,9})? - .+\.\d{3,4}p\..+ - \[.+\]$")
+_TV_CANONICAL_STEM_RX = re.compile(r"^.+ - S\d{1,2}E\d{1,2} - .+ - \[.+\]$")
+
+
+def _xml_esc(s: Any) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _simple_tag(name: str, value: Any, indent: str = "    ", nested: str = "") -> str:
+    """One Matroska <Simple> element, or empty string when value is empty."""
+    if value is None or str(value).strip() == "":
+        return ""
+    return (f"{indent}<Simple>\n"
+            f"{indent}  <Name>{_xml_esc(name)}</Name>\n"
+            f"{indent}  <String>{_xml_esc(str(value).strip())}</String>\n"
+            f"{nested}"
+            f"{indent}</Simple>\n")
+
+
+def _actor_tags(cast: List[Tuple[str, str]], indent: str = "    ") -> str:
+    """ACTOR Simple tags with nested CHARACTER sub-tags."""
+    out = []
+    for actor, character in cast:
+        if not actor:
+            continue
+        nested = ""
+        if character:
+            nested = (f"{indent}  <Simple>\n"
+                      f"{indent}    <Name>CHARACTER</Name>\n"
+                      f"{indent}    <String>{_xml_esc(character)}</String>\n"
+                      f"{indent}  </Simple>\n")
+        out.append(_simple_tag("ACTOR", actor, indent=indent, nested=nested))
+    return "".join(out)
+
+
+def _open_tag(ttv: int) -> str:
+    return ("  <Tag>\n"
+            "    <Targets>\n"
+            f"      <TargetTypeValue>{ttv}</TargetTypeValue>\n"
+            "    </Targets>\n")
+
+
+def _build_rich_tags_xml(meta: Dict[str, Any], is_tv: bool, imdb_id: Optional[str]) -> str:
+    """
+    Build a full Matroska tags document from fetched metadata.
+
+    Movies : TargetTypeValue 50 (TITLE, DATE_RELEASED, GENRE, DIRECTOR, WRITTEN_BY,
+             DESCRIPTION, SYNOPSIS, LAW_RATING, RATING, IMDB, TMDB, ACTOR+CHARACTER)
+             + TargetTypeValue 70 collection tag when the movie belongs to one.
+    TV     : TargetTypeValue 70 show (TITLE, GENRE, NETWORK, LAW_RATING, ACTORs, ids)
+             + 60 season (TITLE, PART_NUMBER)
+             + 50 episode (TITLE, PART_NUMBER, DATE_RELEASED, DIRECTOR, DESCRIPTION,
+               SYNOPSIS, RATING).
+    """
+    parts: List[str] = ['<?xml version="1.0" encoding="UTF-8"?>\n'
+                        '<!DOCTYPE Tags SYSTEM "matroskatags.dtd">\n<Tags>\n']
+
+    if not is_tv:
+        parts.append(_open_tag(50))
+        parts.append(_simple_tag("TITLE", meta.get("title")))
+        parts.append(_simple_tag("DATE_RELEASED", meta.get("date") or meta.get("year")))
+        parts.append(_simple_tag("GENRE", ", ".join(meta.get("genres") or [])))
+        for d in meta.get("directors") or []:
+            parts.append(_simple_tag("DIRECTOR", d))
+        for w in meta.get("writers") or []:
+            parts.append(_simple_tag("WRITTEN_BY", w))
+        parts.append(_actor_tags(meta.get("cast") or []))
+        parts.append(_simple_tag("DESCRIPTION", meta.get("description")))
+        parts.append(_simple_tag("SYNOPSIS", meta.get("synopsis")))
+        parts.append(_simple_tag("LAW_RATING", meta.get("law_rating")))
+        parts.append(_simple_tag("RATING", meta.get("rating")))
+        parts.append(_simple_tag("IMDB", imdb_id))
+        parts.append(_simple_tag("TMDB", meta.get("tmdb_id")))
+        parts.append("  </Tag>\n")
+        if meta.get("collection"):
+            parts.append(_open_tag(70))
+            parts.append(_simple_tag("TITLE", meta.get("collection")))
+            parts.append("  </Tag>\n")
+    else:
+        # Show level
+        parts.append(_open_tag(70))
+        parts.append(_simple_tag("TITLE", meta.get("show")))
+        parts.append(_simple_tag("DATE_RELEASED", meta.get("show_year")))
+        parts.append(_simple_tag("GENRE", ", ".join(meta.get("genres") or [])))
+        parts.append(_simple_tag("NETWORK", meta.get("network")))
+        parts.append(_simple_tag("LAW_RATING", meta.get("law_rating")))
+        parts.append(_actor_tags(meta.get("cast") or []))
+        parts.append(_simple_tag("IMDB", imdb_id))
+        parts.append(_simple_tag("TMDB", meta.get("tmdb_id")))
+        parts.append("  </Tag>\n")
+        # Season level
+        if meta.get("season") is not None:
+            parts.append(_open_tag(60))
+            parts.append(_simple_tag("TITLE", meta.get("season_name")))
+            parts.append(_simple_tag("PART_NUMBER", meta.get("season")))
+            parts.append("  </Tag>\n")
+        # Episode level
+        if meta.get("episode") is not None:
+            parts.append(_open_tag(50))
+            parts.append(_simple_tag("TITLE", meta.get("ep_title")))
+            parts.append(_simple_tag("PART_NUMBER", meta.get("episode")))
+            parts.append(_simple_tag("DATE_RELEASED", meta.get("airdate")))
+            for d in meta.get("directors") or []:
+                parts.append(_simple_tag("DIRECTOR", d))
+            parts.append(_simple_tag("DESCRIPTION", meta.get("description")))
+            parts.append(_simple_tag("SYNOPSIS", meta.get("synopsis")))
+            parts.append(_simple_tag("RATING", meta.get("rating")))
+            parts.append("  </Tag>\n")
+
+    parts.append("</Tags>\n")
+    return "".join(parts)
 
 
 def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result:
@@ -1691,6 +1810,39 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
                     logging.debug("IMDB tag read from existing MKV tags: %s -> %s", mkv_path.name, imdb_id)
             segment_title = f"{title} ({year})" if year else (title or mkv_path.stem)
 
+        # Main-title format: once the filename is canonical (post-FileBot/heuristic
+        # rename), the segment title mirrors the FULL filename convention, e.g.
+        # 'The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu]'.
+        stem = mkv_path.stem
+        if (_TV_CANONICAL_STEM_RX if is_tv else _MOVIE_CANONICAL_STEM_RX).match(stem):
+            segment_title = stem
+
+        # --- Fetch rich metadata (TMDB primary, OMDb supplement) ---
+        # Enabled whenever API keys are configured; --no-fetch-tags disables it.
+        # Failures fall back to the basic (IMDB-only) tags — never fatal, and
+        # dry runs stay offline.
+        rich_xml_text: Optional[str] = None
+        if not dry_run and _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY:
+            try:
+                if is_tv:
+                    s_num = int(season_str[1:]) if season_str else None
+                    e_num = int(ep_str[1:]) if ep_str else None
+                    rich = _get_meta_fetcher().episode_metadata(show_name, imdb_id, s_num, e_num)
+                else:
+                    rich = _get_meta_fetcher().movie_metadata(title, year, imdb_id)
+                if rich:
+                    rich_xml_text = _build_rich_tags_xml(rich, is_tv=is_tv, imdb_id=imdb_id)
+                    logging.info("Tags enriched: %s | genre=%s | director=%s | actors=%d",
+                                 mkv_path.name,
+                                 ", ".join((rich.get("genres") or [])[:3]) or "-",
+                                 ", ".join(rich.get("directors") or []) or "-",
+                                 len(rich.get("cast") or []))
+                else:
+                    logging.debug("No rich metadata found for: %s", mkv_path.name)
+            except Exception as e:
+                logging.warning("Metadata fetch failed (non-fatal, basic tags used): %s | %s",
+                                mkv_path.name, e)
+
         if imdb_id:
             logging.info("Cleaning tags [%s]: %s -> title='%s'  imdb=%s",
                          "tv" if is_tv else "movie", mkv_path.name, segment_title, imdb_id)
@@ -1707,7 +1859,7 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
         #    and writes back the IMDb tag if the ID was found in the filename.
         tags_xml: Optional[Path] = None
         if not dry_run:
-            tags_xml = _write_tags_xml(imdb_id)
+            tags_xml = _write_tags_xml(imdb_id, xml_text=rich_xml_text)
             cmd += ["--tags", f"all:{tags_xml}"]
         else:
             placeholder = f"tags_imdb={imdb_id}" if imdb_id else "tags_empty"
@@ -2263,6 +2415,313 @@ class CoverArtFetcher:
         with self._lock:
             self._cache[cache_key] = result
         return result
+
+
+# =========================
+# Metadata fetching (rich MKV tags) & API key validation
+# =========================
+
+# Rich tag fetching is on by default when API keys are configured;
+# --no-fetch-tags sets this to False in main().
+_FETCH_TAGS_ENABLED: bool = True
+
+
+def _http_get_json_status(url: str, timeout: int = 30) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """Like _http_get_json but also returns the HTTP status (for key validation)."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _HTTP_USER_AGENT, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception as e:
+        logging.debug("HTTP GET failed: %s | %s", url, e)
+        return None, None
+
+
+def validate_api_keys() -> Dict[str, str]:
+    """
+    Check each configured [coverart] API key with one cheap call.
+    Returns {source: 'ok' | 'invalid' | 'network error' | 'not configured'}.
+    Uses tt0111161 (a well-known title) as an always-existing probe title.
+    """
+    status: Dict[str, str] = {}
+
+    if not CFG.TMDB_API_KEY:
+        status["TMDB"] = "not configured"
+    else:
+        code, _ = _http_get_json_status(
+            f"https://api.themoviedb.org/3/configuration?api_key={CFG.TMDB_API_KEY}")
+        status["TMDB"] = "ok" if code == 200 else ("invalid" if code == 401 else "network error")
+
+    if not CFG.FANARTTV_API_KEY:
+        status["fanart.tv"] = "not configured"
+    else:
+        code, _ = _http_get_json_status(
+            f"https://webservice.fanart.tv/v3/movies/tt0111161?api_key={CFG.FANARTTV_API_KEY}")
+        status["fanart.tv"] = "ok" if code == 200 else ("invalid" if code == 401 else "network error")
+
+    if not CFG.OMDB_API_KEY:
+        status["OMDb"] = "not configured"
+    else:
+        code, data = _http_get_json_status(
+            f"https://www.omdbapi.com/?i=tt0111161&apikey={CFG.OMDB_API_KEY}")
+        if code == 200 and data and data.get("Response") == "True":
+            status["OMDb"] = "ok"
+        elif code == 401 or (data and "invalid api key" in str(data.get("Error", "")).lower()):
+            status["OMDb"] = "invalid"
+        else:
+            status["OMDb"] = "network error"
+
+    return status
+
+
+def disable_invalid_api_keys() -> None:
+    """
+    Validate configured keys once at run start; blank out definitively-invalid
+    ones (HTTP 401) in CFG so every worker doesn't fail per-file. Network errors
+    are transient — sources are left enabled.
+    """
+    global CFG
+    status = validate_api_keys()
+    replace: Dict[str, str] = {}
+    key_field = {"TMDB": "TMDB_API_KEY", "fanart.tv": "FANARTTV_API_KEY", "OMDb": "OMDB_API_KEY"}
+    for source, st in status.items():
+        if st == "invalid":
+            logging.warning("API key for %s is INVALID — source disabled for this run. "
+                            "Fix it in [coverart] of %s (verify with --validate-keys).",
+                            source, CONFIG_FILE.name)
+            replace[key_field[source]] = ""
+        elif st == "network error":
+            logging.warning("API key check for %s hit a network error — leaving the source enabled.", source)
+    if replace:
+        CFG = dataclasses.replace(CFG, **replace)
+
+
+class MetadataFetcher:
+    """
+    Fetches movie/TV metadata for rich MKV tagging (cleantags enrichment).
+
+    TMDB is the primary source (details + credits + certifications in one call);
+    OMDb supplements the US certification (LAW_RATING) and IMDB rating (RATING)
+    when TMDB lacks them. Thread-safe; every lookup is cached for the run, so a
+    full season costs one show call + one season call regardless of episode count.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cache: Dict[str, Any] = {}
+
+    def _cached(self, key: str, fetch) -> Any:
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        val = fetch()
+        with self._lock:
+            self._cache[key] = val
+        return val
+
+    # ---------- shared TMDB lookups ----------
+
+    def _tmdb_ids_for_imdb(self, imdb_id: str) -> Tuple[Optional[int], Optional[int]]:
+        url = (f"https://api.themoviedb.org/3/find/{urllib.parse.quote(imdb_id)}"
+               f"?api_key={CFG.TMDB_API_KEY}&external_source=imdb_id")
+        data = _http_get_json(url)
+        if not data:
+            return None, None
+        movies = data.get("movie_results") or []
+        shows = data.get("tv_results") or []
+        return (movies[0].get("id") if movies else None,
+                shows[0].get("id") if shows else None)
+
+    def _tmdb_search_id(self, title: str, year: Optional[str], is_tv: bool) -> Optional[int]:
+        kind = "tv" if is_tv else "movie"
+        url = (f"https://api.themoviedb.org/3/search/{kind}"
+               f"?api_key={CFG.TMDB_API_KEY}&query={urllib.parse.quote(title)}")
+        if year and not is_tv:
+            url += f"&year={year}"
+        data = _http_get_json(url)
+        results = (data or {}).get("results") or []
+        return results[0].get("id") if results else None
+
+    @staticmethod
+    def _top_cast(credits: Dict[str, Any], limit: int = 10) -> List[Tuple[str, str]]:
+        cast = (credits or {}).get("cast") or []
+        return [(str(c.get("name") or ""), str(c.get("character") or "")) for c in cast[:limit]]
+
+    # ---------- movies ----------
+
+    def movie_metadata(self, title: Optional[str], year: Optional[str],
+                       imdb_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not CFG.TMDB_API_KEY:
+            return None
+        cache_key = f"movie:{(imdb_id or f'{title}|{year}' or '').lower()}"
+
+        def fetch() -> Optional[Dict[str, Any]]:
+            tmdb_id: Optional[int] = None
+            if imdb_id:
+                tmdb_id, _tv = self._tmdb_ids_for_imdb(imdb_id)
+            if tmdb_id is None and title:
+                tmdb_id = self._tmdb_search_id(title, year, is_tv=False)
+            if tmdb_id is None:
+                return None
+
+            data = _http_get_json(
+                f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+                f"?api_key={CFG.TMDB_API_KEY}&append_to_response=credits,release_dates")
+            if not data:
+                return None
+
+            crew = (data.get("credits") or {}).get("crew") or []
+            directors = [c.get("name") for c in crew if c.get("job") == "Director" and c.get("name")]
+            writers: List[str] = []
+            for c in crew:
+                if c.get("department") == "Writing" and c.get("name") and c["name"] not in writers:
+                    writers.append(c["name"])
+            overview = str(data.get("overview") or "").strip()
+            tagline = str(data.get("tagline") or "").strip()
+
+            # US certification from TMDB release_dates
+            law_rating: Optional[str] = None
+            for entry in (data.get("release_dates") or {}).get("results") or []:
+                if entry.get("iso_3166_1") == "US":
+                    for rel in entry.get("release_dates") or []:
+                        cert = str(rel.get("certification") or "").strip()
+                        if cert:
+                            law_rating = cert
+                            break
+                    break
+
+            rating: Optional[str] = None
+            if CFG.OMDB_API_KEY and imdb_id:
+                od = _http_get_json(
+                    f"https://www.omdbapi.com/?i={urllib.parse.quote(imdb_id)}&apikey={CFG.OMDB_API_KEY}")
+                if od and od.get("Response") == "True":
+                    if not law_rating and od.get("Rated") not in (None, "", "N/A"):
+                        law_rating = str(od["Rated"])
+                    if od.get("imdbRating") not in (None, "", "N/A"):
+                        rating = str(od["imdbRating"])
+            if rating is None and data.get("vote_average"):
+                rating = f"{float(data['vote_average']):.1f}"
+
+            return {
+                "title": data.get("title") or title,
+                "year": (data.get("release_date") or "")[:4] or year,
+                "date": data.get("release_date") or None,
+                "genres": [g.get("name") for g in data.get("genres") or [] if g.get("name")],
+                "directors": directors[:5],
+                "writers": writers[:5],
+                "cast": self._top_cast(data.get("credits") or {}),
+                "description": tagline or (overview[:250] + "…" if len(overview) > 250 else overview) or None,
+                "synopsis": overview or None,
+                "law_rating": law_rating,
+                "rating": rating,
+                "collection": ((data.get("belongs_to_collection") or {}).get("name") or None),
+                "tmdb_id": tmdb_id,
+            }
+
+        return self._cached(cache_key, fetch)
+
+    # ---------- TV ----------
+
+    def _show_metadata(self, show_name: str, imdb_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        cache_key = f"show:{(imdb_id or show_name or '').lower()}"
+
+        def fetch() -> Optional[Dict[str, Any]]:
+            search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
+            tv_id: Optional[int] = None
+            if imdb_id:
+                _mv, tv_id = self._tmdb_ids_for_imdb(imdb_id)
+            if tv_id is None and search_name:
+                tv_id = self._tmdb_search_id(search_name, None, is_tv=True)
+            if tv_id is None:
+                return None
+
+            data = _http_get_json(
+                f"https://api.themoviedb.org/3/tv/{tv_id}"
+                f"?api_key={CFG.TMDB_API_KEY}&append_to_response=credits,content_ratings")
+            if not data:
+                return None
+
+            law_rating: Optional[str] = None
+            for entry in (data.get("content_ratings") or {}).get("results") or []:
+                if entry.get("iso_3166_1") == "US" and str(entry.get("rating") or "").strip():
+                    law_rating = str(entry["rating"]).strip()
+                    break
+
+            networks = data.get("networks") or []
+            return {
+                "tv_id": tv_id,
+                "show": data.get("name") or show_name,
+                "show_year": (data.get("first_air_date") or "")[:4] or None,
+                "genres": [g.get("name") for g in data.get("genres") or [] if g.get("name")],
+                "network": networks[0].get("name") if networks else None,
+                "cast": self._top_cast(data.get("credits") or {}),
+                "law_rating": law_rating,
+                "tmdb_id": tv_id,
+            }
+
+        return self._cached(cache_key, fetch)
+
+    def _season_json(self, tv_id: int, season: int) -> Optional[Dict[str, Any]]:
+        cache_key = f"season:{tv_id}:{season}"
+
+        def fetch() -> Optional[Dict[str, Any]]:
+            return _http_get_json(
+                f"https://api.themoviedb.org/3/tv/{tv_id}/season/{season}?api_key={CFG.TMDB_API_KEY}")
+
+        return self._cached(cache_key, fetch)
+
+    def episode_metadata(self, show_name: str, imdb_id: Optional[str],
+                         season: Optional[int], episode: Optional[int]) -> Optional[Dict[str, Any]]:
+        if not CFG.TMDB_API_KEY:
+            return None
+        show = self._show_metadata(show_name, imdb_id)
+        if not show:
+            return None
+
+        meta: Dict[str, Any] = dict(show)
+        meta.update({"season": season, "episode": episode,
+                     "season_name": None, "ep_title": None, "airdate": None,
+                     "directors": [], "description": None, "synopsis": None, "rating": None})
+
+        if season is None:
+            return meta
+
+        sdata = self._season_json(show["tv_id"], season)
+        if not sdata:
+            return meta
+        meta["season_name"] = sdata.get("name") or f"Season {season}"
+
+        if episode is None:
+            return meta
+        ep = next((e for e in sdata.get("episodes") or []
+                   if e.get("episode_number") == episode), None)
+        if not ep:
+            return meta
+
+        overview = str(ep.get("overview") or "").strip()
+        meta["ep_title"] = ep.get("name") or None
+        meta["airdate"] = ep.get("air_date") or None
+        meta["directors"] = [c.get("name") for c in ep.get("crew") or []
+                             if c.get("job") == "Director" and c.get("name")][:5]
+        meta["description"] = (overview[:250] + "…" if len(overview) > 250 else overview) or None
+        meta["synopsis"] = overview or None
+        if ep.get("vote_average"):
+            meta["rating"] = f"{float(ep['vote_average']):.1f}"
+        return meta
+
+
+_META_FETCHER: Optional[MetadataFetcher] = None
+_META_FETCHER_LOCK = threading.Lock()
+
+
+def _get_meta_fetcher() -> MetadataFetcher:
+    global _META_FETCHER
+    with _META_FETCHER_LOCK:
+        if _META_FETCHER is None:
+            _META_FETCHER = MetadataFetcher()
+        return _META_FETCHER
 
 
 def embed_cover_into_mkv(
@@ -3448,6 +3907,15 @@ def self_check() -> int:
             logging.error("Self-check failed: cannot access/create: %s | %s", d, e)
             return 3
 
+    # Validate any configured API keys (same checks as --validate-keys)
+    if CFG.TMDB_API_KEY or CFG.FANARTTV_API_KEY or CFG.OMDB_API_KEY:
+        key_status = validate_api_keys()
+        for source, st in key_status.items():
+            logging.info("Self-check API key %-10s: %s", source, st.upper() if st == "invalid" else st)
+        if any(st == "invalid" for st in key_status.values()):
+            logging.error("Self-check failed: invalid API key(s) in [coverart] of %s", CONFIG_FILE)
+            return 6
+
     # Attempt mkvmerge -J on a sample if any MKV exists
     sample = None
     for root in (CFG.MOVIES_ROOT, CFG.TV_ROOT):
@@ -3507,6 +3975,13 @@ def main() -> int:
                          "[coverart] section of MediaCleanup.toml). Uses --movies/--tv/--input scope flags.")
     ap.add_argument("--coverart-overwrite", action="store_true",
                     help="With --coverart: replace existing embedded cover art instead of skipping the file.")
+    ap.add_argument("--validate-keys", action="store_true",
+                    help="Test the API keys in the [coverart] section of MediaCleanup.toml with one "
+                         "cheap call each (TMDB, fanart.tv, OMDb), print a verdict per key, and exit. "
+                         "Exit code 1 if any configured key is invalid.")
+    ap.add_argument("--no-fetch-tags", action="store_true",
+                    help="Disable rich metadata tagging (genre/director/actors/synopsis from TMDB+OMDb) "
+                         "during tag cleaning. Default: enabled whenever API keys are configured.")
     ap.add_argument("--skip-cleantags", action="store_true",
                     help="Disable the automatic tag-clean step that normally runs after each remux.")
     ap.add_argument("--include-forced-subs", action="store_true", help="Allow forced English subtitle selection.")
@@ -3543,6 +4018,23 @@ def main() -> int:
         logging.error("%s", e)
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
+
+    global _FETCH_TAGS_ENABLED
+    if args.no_fetch_tags:
+        _FETCH_TAGS_ENABLED = False
+        logging.info("Rich metadata tagging disabled (--no-fetch-tags).")
+
+    # --validate-keys standalone: test each configured API key and exit.
+    if args.validate_keys:
+        status = validate_api_keys()
+        for source, st in status.items():
+            logging.info("%-10s: %s", source, st.upper() if st == "invalid" else st)
+        invalid = [s for s, st in status.items() if st == "invalid"]
+        if invalid:
+            logging.error("Invalid key(s): %s — fix them in [coverart] of %s",
+                          ", ".join(invalid), CONFIG_FILE)
+            return 1
+        return 0
 
     # Parse --audio-langs into canonical keys early so errors surface before any work starts.
     audio_lang_filter: Optional[List[str]] = None
@@ -3596,6 +4088,12 @@ def main() -> int:
     except Exception as e:
         logging.error("Tool validation failed: %s", e)
         return 2
+
+    # Soft key check at run start: a definitively invalid key (HTTP 401) would
+    # otherwise fail once per file — disable that source up front instead.
+    # Dry runs stay offline, so skip it there.
+    if not args.dry_run and (CFG.TMDB_API_KEY or CFG.FANARTTV_API_KEY or CFG.OMDB_API_KEY):
+        disable_invalid_api_keys()
 
     # Determine which pipelines to run
     if args.movies or args.tv:

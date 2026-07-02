@@ -44,7 +44,11 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 
 ## `[coverart]`
 
-All keys optional — an empty value disables that source. With no keys at all, `--coverart` still works using local poster files only.
+API keys used by **both** `--coverart` (poster fetching) and rich metadata tagging (genre/director/actors/synopsis embedded during tag cleaning). All keys optional — an empty value disables that source. With no keys at all, `--coverart` still works using local poster files only, and tag cleaning writes basic tags.
+
+Verify your keys anytime with `python MediaCleanup_Enhanced.py --validate-keys`.
+
+> Watch the key formats: TMDB and fanart.tv keys are 32 hex characters; OMDb keys are 8. If validation says a key is invalid, check you didn't swap them.
 
 | Key | Description |
 |---|---|
