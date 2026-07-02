@@ -1179,17 +1179,21 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
     # Keep (YYYY) if present.
     s = re.sub(r"\((?!19\d{2}\)|20\d{2}\))[^\)]*\)", " ", s)
 
-    # Extract year
+    # Extract year. Scene convention is 'Title.Year.Quality.Source.Lang.Tags' —
+    # when there is title text BEFORE the year, everything AFTER it is release
+    # junk (e.g. 'The.Film.2026.1080p.WEB-DL.Hindi.ESubs'), so truncate.
     year = None
     m = re.search(r"\((19\d{2}|20\d{2})\)", s)
     if m:
         year = m.group(1)
-        s = s.replace(m.group(0), " ")
+        before = s[:m.start()].strip()
+        s = before if before else s.replace(m.group(0), " ")
     else:
         m2 = re.search(r"\b(19\d{2}|20\d{2})\b", s)
         if m2:
             year = m2.group(1)
-            s = re.sub(r"\b" + re.escape(year) + r"\b", " ", s)
+            before = s[:m2.start()].strip()
+            s = before if before else re.sub(r"\b" + re.escape(year) + r"\b", " ", s)
 
     # Remove common "release junk" tokens from title
     # (we intentionally do NOT remove plain words that could be part of title)
@@ -1200,7 +1204,7 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
         r"hdr10\+?|hdr|dv|dolby\s*vision|"
         r"webrip|web[- ]?dl|bluray|b[dr]rip|remux|"
         r"hdtv|cam|ts|tc|dvdrip|"
-        r"esub|subbed|multi|dubbed|hq|"
+        r"esubs?|msubs?|subbed|multi|dubbed|dual\s*audio|uncut|org|hq|"
         r"ddp?\+?\s*\d\.\d|dd\s*\d\.\d|"
         r"eac3|ac3|aac|dts(?:-hd)?|truehd|atmos|"
         r"(?:8|10)\s*-?\s*bit|"
