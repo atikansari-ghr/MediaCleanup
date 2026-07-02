@@ -2311,12 +2311,36 @@ def embed_cover_into_mkv(
             pass
 
 
+def _save_review_copy(review_dir: Path, mkv_path: Path, image_bytes: bytes) -> Optional[str]:
+    """
+    Save an audit copy of the embedded poster into the review folder, named after
+    the MKV so a wrong poster is immediately obvious in Explorer / the HTML report.
+    Returns the saved filename (relative to review_dir), or None on failure.
+    """
+    ext = ".png" if image_bytes[:4] == b"\x89PNG" else ".jpg"
+    base = sanitize_filename(mkv_path.stem) or "cover"
+    name = f"{base}{ext}"
+    target = review_dir / name
+    if target.exists():
+        # Same stem from another folder (rare): disambiguate with a short path hash.
+        suffix = hashlib.sha1(str(mkv_path).encode("utf-8", "replace")).hexdigest()[:6]
+        name = f"{base}_{suffix}{ext}"
+        target = review_dir / name
+    try:
+        target.write_bytes(image_bytes)
+        return name
+    except Exception as e:
+        logging.warning("Could not save review copy for %s: %s", mkv_path.name, e)
+        return None
+
+
 def process_coverart_one(
     mkv_path: Path,
     is_tv: bool,
     fetcher: CoverArtFetcher,
     dry_run: bool,
     overwrite_cover: bool,
+    review_dir: Optional[Path] = None,
 ) -> Result:
     """
     Full cover-art sequence for one MKV:
@@ -2324,6 +2348,7 @@ def process_coverart_one(
       2. Detect audio languages -> poster language preference (English first).
       3. Source chain: local poster file -> TMDB -> fanart.tv -> OMDb.
       4. Embed as cover.jpg/cover.png via mkvpropedit (in-place, no remux).
+      5. Save an audit copy of the poster into review_dir for verification.
     """
     kind = "coverart"
     try:
@@ -2385,8 +2410,12 @@ def process_coverart_one(
         if embed_cover_into_mkv(mkv_path, img, existing if overwrite_cover else [], dry_run):
             logging.info("%sCover embedded (%s, %d KB): %s",
                          "[DRY] " if dry_run else "", source, len(img) // 1024, mkv_path.name)
+            review_name: Optional[str] = None
+            if review_dir is not None and not dry_run:
+                review_name = _save_review_copy(review_dir, mkv_path, img)
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
-                          ok=True, details={"source": source})
+                          ok=True, details={"source": source, "langs": audio_langs,
+                                            "review_image": review_name})
         return Result(kind=kind, source_items=[mkv_path], output_path=None,
                       ok=False, reason="mkvpropedit_embed_failed")
 
@@ -2394,6 +2423,85 @@ def process_coverart_one(
         logging.exception("Cover art failed: %s", mkv_path.name)
         return Result(kind=kind, source_items=[mkv_path], output_path=None,
                       ok=False, reason=str(e))
+
+
+def _write_coverart_report(review_dir: Path, results: List[Result]) -> Optional[Path]:
+    """
+    Write a self-contained HTML gallery (coverart_report.html) into the review folder:
+    failures listed first, then a thumbnail grid of every embedded poster with the
+    MKV name and source underneath, then the list of files skipped (already covered).
+    """
+    import html as _html
+
+    embedded = [r for r in results if r.ok and r.details.get("review_image")]
+    embedded_no_img = [r for r in results if r.ok and r.reason not in ("already_has_cover", "dry-run")
+                       and not r.details.get("review_image")]
+    skipped = [r for r in results if r.ok and r.reason == "already_has_cover"]
+    failed = [r for r in results if not r.ok]
+
+    def _name(r: Result) -> str:
+        return r.source_items[0].name if r.source_items else "?"
+
+    rows: List[str] = []
+    rows.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+    rows.append("<title>MediaCleanup cover art report</title><style>")
+    rows.append(
+        "body{font-family:Segoe UI,Arial,sans-serif;margin:20px;background:#1b1b1f;color:#ddd}"
+        "h1,h2{color:#fff} a{color:#7ab7ff}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}"
+        "figure{margin:0;background:#26262c;border-radius:8px;padding:10px}"
+        "figure img{width:100%;height:300px;object-fit:contain;background:#000;border-radius:4px}"
+        "figcaption{font-size:12px;margin-top:8px;word-break:break-word}"
+        ".src{color:#8fc98f} .fail{color:#ff8484} details{margin:10px 0}"
+        "li{font-size:13px;margin:2px 0}"
+    )
+    rows.append("</style></head><body>")
+    rows.append("<h1>Cover art report</h1>")
+    rows.append(f"<p>Run: {_html.escape(_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))} &nbsp;|&nbsp; "
+                f"embedded: <b>{len(embedded) + len(embedded_no_img)}</b> &nbsp;|&nbsp; "
+                f"already had cover: <b>{len(skipped)}</b> &nbsp;|&nbsp; "
+                f"failed: <b class='fail'>{len(failed)}</b></p>")
+
+    if failed:
+        rows.append("<h2 class='fail'>Failures — needs attention</h2><ul>")
+        for r in failed:
+            rows.append(f"<li class='fail'>{_html.escape(_name(r))} — {_html.escape(r.reason)}</li>")
+        rows.append("</ul>")
+        rows.append("<p>Fix: drop a <code>poster.jpg</code> into the movie's folder and re-run "
+                    "<code>--coverart</code> for it.</p>")
+
+    if embedded:
+        rows.append("<h2>Embedded posters — verify visually</h2>")
+        rows.append("<p>Wrong poster? Drop the correct <code>poster.jpg</code> into that movie's folder and "
+                    "re-run with <code>--coverart-overwrite</code> (scoped via <code>--input</code>).</p>")
+        rows.append("<div class='grid'>")
+        for r in sorted(embedded, key=_name):
+            img = _html.escape(str(r.details["review_image"]))
+            src = _html.escape(str(r.details.get("source", "?")))
+            langs = ", ".join(r.details.get("langs") or []) or "-"
+            rows.append(
+                f"<figure><img src='{img}' loading='lazy'>"
+                f"<figcaption>{_html.escape(_name(r))}<br>"
+                f"<span class='src'>source: {src} | audio: {_html.escape(langs)}</span>"
+                f"</figcaption></figure>"
+            )
+        rows.append("</div>")
+
+    if skipped:
+        rows.append(f"<details><summary>Skipped — already had a cover ({len(skipped)})</summary><ul>")
+        for r in sorted(skipped, key=_name):
+            rows.append(f"<li>{_html.escape(_name(r))}</li>")
+        rows.append("</ul></details>")
+
+    rows.append("</body></html>")
+
+    report = review_dir / "coverart_report.html"
+    try:
+        report.write_text("\n".join(rows), encoding="utf-8")
+        return report
+    except Exception as e:
+        logging.warning("Could not write cover art report: %s", e)
+        return None
 
 
 def run_coverart_pipeline(
@@ -2431,11 +2539,23 @@ def run_coverart_pipeline(
             is_tv = p in tv_set
         tagged_targets.append((p, is_tv))
 
+    # Audit trail: every embedded poster is copied here, plus an HTML gallery
+    # report, so wrong matches can be spotted at a glance. Dry runs are offline
+    # (no images to show), so no review folder is created.
+    review_dir: Optional[Path] = None
+    if not dry_run and tagged_targets:
+        review_dir = _SCRIPT_DIR / "logs" / "coverart_review" / _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            review_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logging.warning("Could not create review folder %s: %s", review_dir, e)
+            review_dir = None
+
     fetcher = CoverArtFetcher()
     results: List[Result] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
-            ex.submit(process_coverart_one, p, is_tv, fetcher, dry_run, overwrite_cover): p
+            ex.submit(process_coverart_one, p, is_tv, fetcher, dry_run, overwrite_cover, review_dir): p
             for p, is_tv in tagged_targets
         }
         for fut in concurrent.futures.as_completed(futs):
@@ -2446,6 +2566,13 @@ def run_coverart_pipeline(
                 logging.exception("coverart worker crashed: %s", p)
                 results.append(Result(kind="coverart", source_items=[p], output_path=None,
                                       ok=False, reason=f"Worker exception: {e}"))
+
+    if review_dir is not None:
+        report = _write_coverart_report(review_dir, results)
+        if report:
+            logging.info("Cover art review: %s", review_dir)
+            logging.info("Open in a browser to verify posters: %s", report)
+
     return results
 
 

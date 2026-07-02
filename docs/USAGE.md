@@ -99,6 +99,8 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 
 **TV:** every episode gets the **show** poster (not episode stills). It's downloaded once per series per run and reused.
 
+**Verification (automatic):** every run creates `logs\coverart_review\<timestamp>\` next to the script, containing a copy of each embedded poster **named after its MKV**, plus `coverart_report.html` — open it in a browser to visually verify the matches. Failures are listed at the top of the report; a wrong poster is fixed by dropping the correct `poster.jpg` into that movie's folder and re-running with `--coverart-overwrite` (scope it with `--input`). The review folder is an audit copy only — deleting it changes nothing in your MKVs.
+
 ```bat
 :: Backfill the whole library (skips files that already have covers)
 python MediaCleanup_Enhanced.py --coverart
