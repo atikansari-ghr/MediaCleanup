@@ -25,6 +25,7 @@ import concurrent.futures
 import dataclasses
 import datetime as _dt
 import difflib
+import fnmatch
 import hashlib
 import json
 import logging
@@ -41,6 +42,21 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Optional dependency: 'rich' enables colored log output and end-of-run summary
+# tables. Without it the script runs identically with plain-text output.
+#   pip install rich
+try:
+    from rich.console import Console as _RichConsole
+    from rich.logging import RichHandler as _RichHandler
+    from rich.table import Table as _RichTable
+    _RICH_AVAILABLE = True
+except ImportError:
+    _RICH_AVAILABLE = False
+
+# Populated in main() when rich output is active (installed, not --no-color/NO_COLOR).
+_RICH_ENABLED: bool = False
+_CONSOLE: Optional["_RichConsole"] = None
 
 # =========================
 # Configurable constants
@@ -309,17 +325,77 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.DEBUG if verbose else logging.INFO)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
+    if _RICH_ENABLED and _CONSOLE is not None:
+        # Rich renders timestamp + colored level itself; message-only format.
+        rh = _RichHandler(console=_CONSOLE, show_path=False, rich_tracebacks=False,
+                          omit_repeated_times=False)
+        rh.setLevel(logging.DEBUG if verbose else logging.INFO)
+        rh.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(rh)
+    else:
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setLevel(logging.DEBUG if verbose else logging.INFO)
+        sh.setFormatter(fmt)
+        logger.addHandler(sh)
 
+    # Log file is always plain text (grep-able), regardless of console styling.
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         logger.addHandler(fh)
+
+
+# Result.reason values that mean "nothing to do" rather than "work done".
+_SKIP_REASONS = ("already_has_cover", "already_covered", "already_named",
+                 "ledger_skip", "dry-run", "unchanged")
+
+
+def print_results_table(title: str, results: List[Result]) -> None:
+    """
+    Render an end-of-run summary table (rich only; silently does nothing in
+    plain mode — the classic logging summary lines are always emitted anyway).
+    Columns: File | Action | Status | Detail with green OK / yellow SKIP / red FAIL.
+    """
+    if not _RICH_ENABLED or _CONSOLE is None or not results:
+        return
+
+    table = _RichTable(title=title, header_style="bold cyan", border_style="dim",
+                       title_style="bold", expand=False)
+    table.add_column("File", overflow="fold", max_width=70)
+    table.add_column("Action", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Detail", overflow="fold", max_width=70)
+
+    def sort_key(r: Result) -> str:
+        return r.source_items[0].name.lower() if r.source_items else ""
+
+    for r in sorted(results, key=sort_key):
+        name = r.source_items[0].name if r.source_items else "?"
+        if r.ok and r.reason in _SKIP_REASONS:
+            status = "[yellow]SKIP[/yellow]"
+        elif r.ok:
+            status = "[green]OK[/green]"
+        else:
+            status = "[red]FAIL[/red]"
+
+        if not r.ok:
+            detail = r.reason
+        elif r.kind == "rename" and (r.details.get("new") or r.details.get("proposed")):
+            detail = f"-> {Path(str(r.details.get('new') or r.details.get('proposed'))).name}"
+        elif r.kind == "coverart":
+            detail = str(r.details.get("source") or r.reason or "")
+        elif r.kind == "subtitles":
+            detail = ", ".join(r.details.get("langs") or []) or r.reason
+        elif r.output_path is not None and r.output_path.name != name:
+            detail = f"-> {r.output_path.name}"
+        else:
+            detail = r.reason or ""
+
+        table.add_row(name, r.kind, status, detail or "")
+
+    _CONSOLE.print(table)
 
 
 # =========================
@@ -750,6 +826,34 @@ def scan_mkvs(root: Path) -> List[Path]:
         if p.is_file():
             out.append(p)
     return out
+
+
+def matches_filters(mkv: Path, root: Path, patterns: Optional[List[str]]) -> bool:
+    """
+    Case-insensitive glob match for --filter. A file is included when ANY
+    pattern matches its filename OR its first folder component under the scan
+    root (movie folder / show folder). No patterns -> everything matches.
+    """
+    if not patterns:
+        return True
+    candidates = [mkv.name.lower()]
+    try:
+        rel = mkv.relative_to(root)
+        if len(rel.parts) > 1:
+            candidates.append(rel.parts[0].lower())
+    except ValueError:
+        pass
+    return any(fnmatch.fnmatchcase(c, pat.lower()) for pat in patterns for c in candidates)
+
+
+def apply_scan_filters(files: List[Path], root: Path,
+                       patterns: Optional[List[str]], mode: str) -> List[Path]:
+    """Apply --filter patterns to a scan result, logging how many survived."""
+    if not patterns:
+        return files
+    kept = [f for f in files if matches_filters(f, root, patterns)]
+    logging.info("%s - filter %s: %d of %d MKV(s) match.", mode, patterns, len(kept), len(files))
+    return kept
 
 
 _MOVIE_NOISE_TOKENS = re.compile(
@@ -2070,17 +2174,18 @@ def run_cleantags_pipeline(
     movies_root: Optional[Path] = None,
     tv_root: Optional[Path] = None,
     skip_filebot: bool = False,
+    filters: Optional[List[str]] = None,
 ) -> List[Result]:
     """Scan Movies/TV roots, clean tags, and rename via FileBot on every MKV found."""
     movies_root = movies_root or CFG.MOVIES_ROOT
     tv_root     = tv_root     or CFG.TV_ROOT
     targets: List[Path] = []
     if do_movies:
-        found = scan_mkvs(movies_root)
+        found = apply_scan_filters(scan_mkvs(movies_root), movies_root, filters, "cleantags")
         logging.info("cleantags - Movies: %d MKV(s) found in %s.", len(found), movies_root)
         targets.extend(found)
     if do_tv:
-        found = scan_mkvs(tv_root)
+        found = apply_scan_filters(scan_mkvs(tv_root), tv_root, filters, "cleantags")
         logging.info("cleantags - TV: %d MKV(s) found in %s.", len(found), tv_root)
         targets.extend(found)
 
@@ -2137,16 +2242,94 @@ _TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w780"
 _HTTP_USER_AGENT = "MediaCleanup/1.0"
 
 
-def mkv_cover_attachment_ids(meta: Dict[str, Any]) -> List[int]:
-    """Return attachment IDs whose file_name marks them as embedded cover art."""
+def mkv_cover_attachments(meta: Dict[str, Any]) -> Tuple[List[int], bool]:
+    """
+    Return (cover_attachment_ids, written_by_us).
+    written_by_us is True when any cover attachment carries the description
+    'Cover art' — the marker this script sets when embedding. Covers without
+    it came with the release (foreign) and are fair game for replacement.
+    """
     ids: List[int] = []
+    ours = False
     for att in meta.get("attachments", []) or []:
         name = str(att.get("file_name", "")).lower()
         if name in _COVER_ATTACHMENT_NAMES:
             aid = att.get("id")
             if aid is not None:
                 ids.append(int(aid))
-    return ids
+            if str(att.get("description", "")).strip().lower() == "cover art":
+                ours = True
+    return ids, ours
+
+
+# Ledger of files whose cover art this script has embedded. Default --coverart
+# runs skip ledger entries instantly (no mkvmerge/API calls); --coverart-overwrite
+# ignores it and re-embeds. Stale rows (file gone) are pruned on save.
+COVERART_LEDGER_CSV = _SCRIPT_DIR / "logs" / "coverart_done.csv"
+
+
+class CoverartLedger:
+    """Thread-safe persistent record: path -> (size, date, source)."""
+
+    def __init__(self, csv_path: Path = COVERART_LEDGER_CSV) -> None:
+        self._csv_path = csv_path
+        self._lock = threading.Lock()
+        self._entries: Dict[str, Tuple[int, str, str]] = {}  # lower path -> (size, date, source)
+        self._load()
+
+    def _load(self) -> None:
+        import csv
+        if not self._csv_path.exists():
+            return
+        try:
+            with self._csv_path.open("r", newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        self._entries[str(row["path"]).lower()] = (
+                            int(row["size"]), str(row.get("date", "")), str(row.get("source", "")))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            logging.debug("Coverart ledger loaded: %d entries", len(self._entries))
+        except Exception as e:
+            logging.warning("Could not read coverart ledger (starting fresh): %s", e)
+
+    def has(self, mkv: Path) -> bool:
+        """True when the file is recorded AND its size still matches (a remux/replace invalidates it)."""
+        with self._lock:
+            entry = self._entries.get(str(mkv).lower())
+        if entry is None:
+            return False
+        try:
+            return mkv.stat().st_size == entry[0]
+        except OSError:
+            return False
+
+    def add(self, mkv: Path, source: str) -> None:
+        try:
+            size = mkv.stat().st_size
+        except OSError:
+            return
+        with self._lock:
+            self._entries[str(mkv).lower()] = (
+                size, _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), source)
+
+    def save(self) -> None:
+        """Rewrite the CSV, pruning rows whose files no longer exist."""
+        import csv
+        with self._lock:
+            entries = dict(self._entries)
+        kept = {p: v for p, v in entries.items() if Path(p).exists()}
+        pruned = len(entries) - len(kept)
+        try:
+            self._csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._csv_path.open("w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["path", "size", "date", "source"])
+                for p, (size, date, source) in sorted(kept.items()):
+                    w.writerow([p, size, date, source])
+            logging.debug("Coverart ledger saved: %d entries (%d stale pruned)", len(kept), pruned)
+        except Exception as e:
+            logging.warning("Could not save coverart ledger (non-fatal): %s", e)
 
 
 def find_local_poster(mkv_path: Path, is_tv: bool) -> Optional[Path]:
@@ -2835,23 +3018,38 @@ def process_coverart_one(
     dry_run: bool,
     overwrite_cover: bool,
     review_dir: Optional[Path] = None,
+    ledger: Optional[CoverartLedger] = None,
 ) -> Result:
     """
     Full cover-art sequence for one MKV:
-      1. Skip if a cover attachment already exists (unless overwrite).
-      2. Detect audio languages -> poster language preference (English first).
-      3. Source chain: local poster file -> TMDB -> fanart.tv -> OMDb.
-      4. Embed as cover.jpg/cover.png via mkvpropedit (in-place, no remux).
-      5. Save an audit copy of the poster into review_dir for verification.
+      1. Ledger hit (already embedded by this script, size unchanged) -> instant skip.
+      2. Cover WE embedded found in the file (description 'Cover art') -> skip,
+         self-heal the ledger. Foreign covers from the release get REPLACED.
+      3. Detect audio languages -> poster language preference (English first).
+      4. Source chain: local poster file -> TMDB -> fanart.tv -> OMDb.
+      5. Embed as cover.jpg/cover.png via mkvpropedit (in-place, no remux).
+      6. Save an audit copy into review_dir; record the file in the ledger.
+    --coverart-overwrite skips steps 1-2 and re-embeds unconditionally.
     """
     kind = "coverart"
     try:
+        if not overwrite_cover and ledger is not None and ledger.has(mkv_path):
+            logging.debug("Ledger: cover already done, skipping: %s", mkv_path.name)
+            return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                          ok=True, reason="ledger_skip")
+
         meta = mkvmerge_identify_json(mkv_path)
-        existing = mkv_cover_attachment_ids(meta)
-        if existing and not overwrite_cover:
-            logging.debug("Cover already present, skipping: %s", mkv_path.name)
+        existing, ours = mkv_cover_attachments(meta)
+        if existing and ours and not overwrite_cover:
+            # Our cover is in the file but the ledger didn't know (renamed file,
+            # rebuilt ledger, ...) — record it and move on.
+            if ledger is not None and not dry_run:
+                ledger.add(mkv_path, "self-heal")
+            logging.debug("Own cover already embedded, skipping: %s", mkv_path.name)
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                           ok=True, reason="already_has_cover")
+        if existing and not ours and not overwrite_cover:
+            logging.info("Foreign cover found (came with the release) — replacing: %s", mkv_path.name)
 
         tracks = extract_tracks(mkv_path, meta)
         detected = {detect_language_canonical(t) for t in tracks if t.type == "audio"}
@@ -2901,12 +3099,16 @@ def process_coverart_one(
 
         img = _maybe_downscale_poster(img)
 
-        if embed_cover_into_mkv(mkv_path, img, existing if overwrite_cover else [], dry_run):
+        # Any pre-existing cover attachments are replaced by the new embed.
+        if embed_cover_into_mkv(mkv_path, img, existing, dry_run):
             logging.info("%sCover embedded (%s, %d KB): %s",
                          "[DRY] " if dry_run else "", source, len(img) // 1024, mkv_path.name)
             review_name: Optional[str] = None
-            if review_dir is not None and not dry_run:
-                review_name = _save_review_copy(review_dir, mkv_path, img)
+            if not dry_run:
+                if review_dir is not None:
+                    review_name = _save_review_copy(review_dir, mkv_path, img)
+                if ledger is not None:
+                    ledger.add(mkv_path, source)
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                           ok=True, details={"source": source, "langs": audio_langs,
                                             "review_image": review_name})
@@ -3006,6 +3208,7 @@ def run_coverart_pipeline(
     movies_root: Optional[Path] = None,
     tv_root: Optional[Path] = None,
     overwrite_cover: bool = False,
+    filters: Optional[List[str]] = None,
 ) -> List[Result]:
     """Scan Movies/TV roots and embed cover art into every MKV missing one."""
     movies_root = movies_root or CFG.MOVIES_ROOT
@@ -3016,8 +3219,10 @@ def run_coverart_pipeline(
                         "only local poster files (poster.jpg/cover.jpg/folder.jpg) will be used.",
                         CONFIG_FILE.name)
 
-    movie_set: set[Path] = set(scan_mkvs(movies_root)) if do_movies else set()
-    tv_set: set[Path] = set(scan_mkvs(tv_root)) if do_tv else set()
+    movie_set: set[Path] = set(apply_scan_filters(scan_mkvs(movies_root), movies_root,
+                                                  filters, "coverart")) if do_movies else set()
+    tv_set: set[Path] = set(apply_scan_filters(scan_mkvs(tv_root), tv_root,
+                                               filters, "coverart")) if do_tv else set()
     if do_movies:
         logging.info("coverart - Movies: %d MKV(s) found in %s.", len(movie_set), movies_root)
     if do_tv:
@@ -3046,10 +3251,12 @@ def run_coverart_pipeline(
             review_dir = None
 
     fetcher = CoverArtFetcher()
+    ledger = CoverartLedger()
     results: List[Result] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
-            ex.submit(process_coverart_one, p, is_tv, fetcher, dry_run, overwrite_cover, review_dir): p
+            ex.submit(process_coverart_one, p, is_tv, fetcher, dry_run,
+                      overwrite_cover, review_dir, ledger): p
             for p, is_tv in tagged_targets
         }
         for fut in concurrent.futures.as_completed(futs):
@@ -3060,6 +3267,9 @@ def run_coverart_pipeline(
                 logging.exception("coverart worker crashed: %s", p)
                 results.append(Result(kind="coverart", source_items=[p], output_path=None,
                                       ok=False, reason=f"Worker exception: {e}"))
+
+    if not dry_run:
+        ledger.save()
 
     if review_dir is not None:
         report = _write_coverart_report(review_dir, results)
@@ -3249,7 +3459,10 @@ def process_rename_one(
                 if "[TEST]" in line or "Skipped" in line or "Failed" in line:
                     logging.info("[DRY] %s", line.strip())
             if "[TEST]" in out_txt or "skipped" in out_txt.lower():
-                return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
+                mt = re.search(r"\[TEST\] from \[.+?\] to \[(.+?)\]\s*$", out_txt, flags=re.M)
+                details = {"proposed": mt.group(1)} if mt else {}
+                return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                              reason="dry-run", details=details)
             tail = out_txt.splitlines()[-1].strip() if out_txt else f"rc={r.rc}"
             return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
                           reason=f"FileBot found no match: {tail}")
@@ -3300,9 +3513,10 @@ def run_rename_pipeline(
     workers: int,
     force_audio_langs: Optional[Dict[int, str]] = None,
     force_sub_langs: Optional[Dict[int, str]] = None,
+    filters: Optional[List[str]] = None,
 ) -> List[Result]:
     """FileBot-rename every MKV under scan_root. In-place unless rename_into."""
-    targets = scan_mkvs(scan_root)
+    targets = apply_scan_filters(scan_mkvs(scan_root), scan_root, filters, "rename")
     logging.info("rename - %s: %d MKV(s) found in %s.%s",
                  "TV" if is_tv else "Movies", len(targets), scan_root,
                  " (organizing into library)" if rename_into else " (in-place)")
@@ -3590,6 +3804,7 @@ def run_subtitles_pipeline(
     workers: int,
     movies_root: Optional[Path] = None,
     tv_root: Optional[Path] = None,
+    filters: Optional[List[str]] = None,
 ) -> List[Result]:
     """Scan Movies/TV roots and download missing sidecar subtitles."""
     movies_root = movies_root or CFG.MOVIES_ROOT
@@ -3601,8 +3816,10 @@ def run_subtitles_pipeline(
         return [Result(kind="subtitles", source_items=[], output_path=None, ok=False,
                        reason="missing OpenSubtitles credentials")]
 
-    movie_set: set[Path] = set(scan_mkvs(movies_root)) if do_movies else set()
-    tv_set: set[Path] = set(scan_mkvs(tv_root)) if do_tv else set()
+    movie_set: set[Path] = set(apply_scan_filters(scan_mkvs(movies_root), movies_root,
+                                                  filters, "subtitles")) if do_movies else set()
+    tv_set: set[Path] = set(apply_scan_filters(scan_mkvs(tv_root), tv_root,
+                                               filters, "subtitles")) if do_tv else set()
     if do_movies:
         logging.info("subtitles - Movies: %d MKV(s) found in %s.", len(movie_set), movies_root)
     if do_tv:
@@ -4621,6 +4838,13 @@ def main() -> int:
     ap.add_argument("--no-fetch-tags", action="store_true",
                     help="Disable rich metadata tagging (genre/director/actors/synopsis from TMDB+OMDb) "
                          "during tag cleaning. Default: enabled whenever API keys are configured.")
+    ap.add_argument("--filter", action="append", metavar="PATTERN", default=None,
+                    help="Only process items matching this case-insensitive glob pattern "
+                         "(matched against the movie/show folder name AND the MKV filename). "
+                         "Repeatable. Works in every mode. Example: --filter \"A*\"")
+    ap.add_argument("--no-color", action="store_true",
+                    help="Disable colored output and summary tables (also honored via the "
+                         "NO_COLOR environment variable). Automatic when 'rich' is not installed.")
     ap.add_argument("--skip-cleantags", action="store_true",
                     help="Disable the automatic tag-clean step that normally runs after each remux.")
     ap.add_argument("--include-forced-subs", action="store_true", help="Allow forced English subtitle selection.")
@@ -4647,6 +4871,14 @@ def main() -> int:
     args = ap.parse_args()
 
     log_file = Path(args.log_file) if args.log_file else None
+
+    # Colored output + summary tables when 'rich' is installed and color isn't
+    # disabled via --no-color or the NO_COLOR convention.
+    global _RICH_ENABLED, _CONSOLE
+    if _RICH_AVAILABLE and not args.no_color and not os.environ.get("NO_COLOR"):
+        _CONSOLE = _RichConsole()
+        _RICH_ENABLED = True
+
     setup_logging(args.verbose, log_file)
 
     # Load paths from MediaCleanup.toml (same folder as this script).
@@ -4781,6 +5013,7 @@ def main() -> int:
             movies_root=movies_root,
             tv_root=tv_root,
             skip_filebot=False,  # always attempt FileBot rename in --cleantags mode
+            filters=args.filter,
         )
         ok_ct  = sum(1 for r in ct_results if r.ok)
         bad_ct = sum(1 for r in ct_results if not r.ok)
@@ -4789,6 +5022,7 @@ def main() -> int:
             for r in ct_results:
                 if not r.ok:
                     logging.error("  FAILED: %s | %s", r.source_items[0].name if r.source_items else "?", r.reason)
+        print_results_table("Cleantags results", ct_results)
         return 0 if bad_ct == 0 else 1
 
     # --rename standalone: FileBot-rename every MKV in scope, then exit.
@@ -4807,6 +5041,7 @@ def main() -> int:
             workers=args.workers,
             force_audio_langs=force_audio_langs,
             force_sub_langs=force_sub_langs,
+            filters=args.filter,
         )
         ok_rn = sum(1 for r in rn_results if r.ok)
         bad_rn = sum(1 for r in rn_results if not r.ok)
@@ -4818,6 +5053,7 @@ def main() -> int:
                 if not r.ok:
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
+        print_results_table("Rename results", rn_results)
         return 0 if bad_rn == 0 else 1
 
     # --subtitles standalone: download missing sidecar subs, then exit.
@@ -4829,6 +5065,7 @@ def main() -> int:
             workers=args.workers,
             movies_root=movies_root,
             tv_root=tv_root,
+            filters=args.filter,
         )
         ok_st = sum(1 for r in st_results if r.ok)
         bad_st = sum(1 for r in st_results if not r.ok)
@@ -4841,6 +5078,7 @@ def main() -> int:
                 if not r.ok and r.reason != "quota_exhausted":
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
+        print_results_table("Subtitle results", st_results)
         return 0 if bad_st == 0 else 1
 
     # --coverart standalone: scan roots, embed cover art in-place, then exit.
@@ -4853,17 +5091,20 @@ def main() -> int:
             movies_root=movies_root,
             tv_root=tv_root,
             overwrite_cover=args.coverart_overwrite,
+            filters=args.filter,
         )
         ok_ca = sum(1 for r in ca_results if r.ok)
         bad_ca = sum(1 for r in ca_results if not r.ok)
-        skipped_ca = sum(1 for r in ca_results if r.ok and r.reason == "already_has_cover")
-        logging.info("coverart summary: total=%d OK=%d (already had cover: %d) failed=%d",
+        skipped_ca = sum(1 for r in ca_results
+                         if r.ok and r.reason in ("already_has_cover", "ledger_skip"))
+        logging.info("coverart summary: total=%d OK=%d (already done: %d) failed=%d",
                      len(ca_results), ok_ca, skipped_ca, bad_ca)
         if bad_ca:
             for r in ca_results:
                 if not r.ok:
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
+        print_results_table("Cover art results", ca_results)
         return 0 if bad_ca == 0 else 1
 
     # Ensure work/output roots exist
@@ -4880,7 +5121,7 @@ def main() -> int:
     # Movies: group per-folder then per similarity group
     movie_tasks: List[Tuple[List[Path], Path]] = []
     if do_movies:
-        movies = scan_mkvs(movies_root)
+        movies = apply_scan_filters(scan_mkvs(movies_root), movies_root, args.filter, "movies")
         logging.info("Movies scan: %d MKV(s) found in %s.", len(movies), movies_root)
         by_folder = group_movies_by_folder(movies)
         for folder, mkvs in by_folder.items():
@@ -4891,7 +5132,7 @@ def main() -> int:
     # TV: per-file
     tv_files: List[Path] = []
     if do_tv:
-        tv_files = scan_mkvs(tv_root)
+        tv_files = apply_scan_filters(scan_mkvs(tv_root), tv_root, args.filter, "tv")
         logging.info("TV scan: %d MKV(s) found in %s.", len(tv_files), tv_root)
 
     # Parallel execution
@@ -4946,6 +5187,7 @@ def main() -> int:
                 srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
                 logging.info("- %s | %s | %s", r.kind, srcs, r.reason)
 
+    print_results_table("Run results", results)
     return 0 if bad == 0 else 1
 
 

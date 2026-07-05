@@ -12,6 +12,8 @@ Full reference for running `MediaCleanup_Enhanced.py`. For configuration file de
 
 All folder locations (media roots, tool paths) live in `MediaCleanup.toml` — the script has no hardcoded paths.
 
+**Recommended:** `pip install rich` — enables colored log levels and end-of-run summary tables (`File | Action | Status | Detail` with green OK / yellow SKIP / red FAIL). Without it the script runs identically with plain-text output.
+
 ---
 
 ## Quick reference
@@ -81,16 +83,20 @@ python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi --force-sub-lang
 
 | Flag | Meaning |
 |---|---|
+| `--filter PATTERN` | Only process items matching a case-insensitive glob (`A*` ≡ `a*`), tested against the movie/show **folder name** and the **MKV filename** (either match includes the file). Repeatable: `--filter "A*" --filter "B*"`. Works in every mode. |
 | `--dry-run` | Log all planned actions; write nothing. `--coverart` dry-run also stays fully offline. |
 | `--verbose` | Debug logging (track decisions, full command lines). |
 | `--workers N` | Parallel worker threads (default: CPU count − 1). |
-| `--log-file PATH` | Also write the log to a file. |
+| `--log-file PATH` | Also write the log to a file (always plain text). |
+| `--no-color` | Disable colored output and summary tables (`NO_COLOR` env also honored). |
 
 ---
 
 ## Cover art
 
 `--coverart` embeds a poster into each MKV as a `cover.jpg` attachment (the Matroska cover-art convention — shown by VLC, MPC-HC, Jellyfin, and Windows Explorer thumbnails). It edits attachments in-place; media streams are never touched.
+
+**Skip/redo logic (ledger):** every embed is recorded in `logs\coverart_done.csv`. On later runs, recorded files are skipped **instantly** (no probing, no API calls), so whole-library re-runs cost seconds. Files with a cover the script embedded earlier but missing from the ledger (renamed file, rebuilt ledger) are recognized by the "Cover art" attachment marker and re-recorded without re-downloading. Covers that **came with the release** are treated as junk and **replaced** by default. `--coverart-overwrite` ignores the ledger and re-fetches/re-embeds everything in scope — combine with `--filter`/`--input` to redo specific titles. Stale ledger rows (files that no longer exist) are pruned automatically.
 
 **Source chain** (first hit wins):
 
