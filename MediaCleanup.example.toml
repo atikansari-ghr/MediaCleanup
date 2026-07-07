@@ -23,7 +23,8 @@ mkvtoolnix_dir = 'C:\Program Files\MKVToolNix'
 [filebot]
 # Optional. If 'exe' is omitted or the file does not exist, the script runs
 # without FileBot (renaming falls back to built-in filename heuristics).
-# exe = 'C:\Program Files\FileBot\filebot.exe'
+# Installed:              exe = 'C:\Program Files\FileBot\filebot.exe'
+# Portable (recommended): exe = 'D:\Projects\MediaCleanup\runtimes\FileBot\filebot.exe'
 db = "TheMovieDB"
 
 [paths]
