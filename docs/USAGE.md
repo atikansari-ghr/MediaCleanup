@@ -1,6 +1,6 @@
 # MediaCleanup Enhanced — Usage Guide
 
-Full reference for running `MediaCleanup_Enhanced.py`. For configuration file details see [CONFIGURATION.md](CONFIGURATION.md); for the underlying processing rules see [PROMPT.md](PROMPT.md).
+Full reference for running `MediaCleanup_Enhanced.py`. For configuration file details see [CONFIGURATION.md](CONFIGURATION.md).
 
 ---
 

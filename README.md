@@ -77,7 +77,6 @@ TV:      Show Name (2008) - S01E01 - Pilot - 1080p.x265 - [English].mkv
 |---|---|
 | [docs/USAGE.md](docs/USAGE.md) | Full usage guide — every flag, workflows, recipes, troubleshooting |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `MediaCleanup.toml` key explained |
-| [docs/PROMPT.md](docs/PROMPT.md) | Complete behavioral specification — processing rules, track scoring, naming formats. Doubles as an AI-assistant context file for maintaining the script |
 
 ## License
 

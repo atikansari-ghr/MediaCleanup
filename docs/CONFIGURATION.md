@@ -70,7 +70,7 @@ Credentials for the `--subtitles` mode (OpenSubtitles.com REST API). All three c
 
 ## What stays in the script
 
-Behavioral constants are deliberately **not** in the TOML — they define what the tool *is*, and changing them means changing the spec (see [PROMPT.md](PROMPT.md)):
+Behavioral constants are deliberately **not** in the TOML — they define what the tool *is*, and changing them means changing the spec:
 
 - Target languages (Hindi, English, Telugu) and their detection tokens
 - Video/audio/subtitle codec preference rankings
