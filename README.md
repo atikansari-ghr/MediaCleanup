@@ -59,23 +59,42 @@ flowchart LR
 | [rich](https://pypi.org/project/rich/) | *Optional (recommended)* — colored output + summary tables (`pip install rich`) |
 | [Pillow](https://pypi.org/project/pillow/) | *Optional* — downscales oversized local posters for `--coverart` |
 
+## Folder layout
+
+Runtime tools live inside the project — drop them into the committed skeleton and the default config finds them automatically (relative paths resolve against the script folder). See [runtimes/README.md](runtimes/README.md) for details.
+
+```
+MediaCleanup\
+├── MediaCleanup.py              ← the tool
+├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
+├── MediaCleanup.toml            ← your config + API keys (git-ignored)
+├── runtimes\                    ← portable tools (binaries git-ignored)
+│   ├── mkvtoolnix\              ←   REQUIRED: extract MKVToolNix portable here
+│   └── FileBot\                 ←   OPTIONAL: portable FileBot here
+├── logs\                        ← rename history, cover art ledger + reviews (auto-created)
+└── docs\                        ← usage & configuration guides
+```
+
 ## Quick start
 
 ```bat
 :: 1. Get the code
-git clone <this-repo> && cd MediaCleanup
+git clone https://github.com/atikansari-ghr/MediaCleanup.git && cd MediaCleanup
 
-:: 2. Create your config (git-ignored; holds your paths + API keys)
+:: 2. Drop MKVToolNix (portable) into runtimes\mkvtoolnix
+::    https://mkvtoolnix.download/downloads.html#windows
+
+:: 3. Create your config (git-ignored; holds your paths + API keys)
 copy MediaCleanup.example.toml MediaCleanup.toml
 notepad MediaCleanup.toml
 
-:: 3. Validate tools and folders
+:: 4. Validate tools and folders
 python MediaCleanup.py --self-check
 
-:: 4. Preview what would happen (nothing is written)
+:: 5. Preview what would happen (nothing is written)
 python MediaCleanup.py --dry-run --verbose
 
-:: 5. Run
+:: 6. Run
 python MediaCleanup.py
 ```
 

@@ -209,16 +209,22 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
             raise ConfigError(f"Missing required key '{key}' in [{section_name}] of {config_file}")
         return str(v)
 
-    mkvtoolnix_dir = Path(required(tools, "tools", "mkvtoolnix_dir"))
+    def as_path(value: str) -> Path:
+        """Relative TOML paths resolve against the script folder, so a cloned
+        project with tools in runtimes\\ works regardless of install location."""
+        p = Path(value)
+        return p if p.is_absolute() else (_SCRIPT_DIR / p)
+
+    mkvtoolnix_dir = as_path(required(tools, "tools", "mkvtoolnix_dir"))
 
     def tool_exe(key: str, default_name: str) -> Path:
         v = tools.get(key)
-        return Path(str(v)) if v else mkvtoolnix_dir / default_name
+        return as_path(str(v)) if v else mkvtoolnix_dir / default_name
 
     # FileBot is optional: point at a guaranteed-nonexistent path when not configured
     # so all FILEBOT_EXE.exists() checks skip FileBot gracefully.
     fb = filebot.get("exe")
-    filebot_exe = Path(str(fb)) if fb else (_SCRIPT_DIR / "__filebot_not_configured__")
+    filebot_exe = as_path(str(fb)) if fb else (_SCRIPT_DIR / "__filebot_not_configured__")
 
     return Config(
         MKVTOOLNIX_DIR=mkvtoolnix_dir,
@@ -227,10 +233,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         MKVINFO_EXE=tool_exe("mkvinfo", "mkvinfo.exe"),
         MKVEXTRACT_EXE=tool_exe("mkvextract", "mkvextract.exe"),
         FILEBOT_EXE=filebot_exe,
-        MOVIES_ROOT=Path(required(paths, "paths", "movies_root")),
-        TV_ROOT=Path(required(paths, "paths", "tv_root")),
-        WORK_ROOT=Path(required(paths, "paths", "work_root")),
-        OUTPUT_ROOT=Path(required(paths, "paths", "output_root")),
+        MOVIES_ROOT=as_path(required(paths, "paths", "movies_root")),
+        TV_ROOT=as_path(required(paths, "paths", "tv_root")),
+        WORK_ROOT=as_path(required(paths, "paths", "work_root")),
+        OUTPUT_ROOT=as_path(required(paths, "paths", "output_root")),
         FILEBOT_DB=str(filebot.get("db", "TheMovieDB")),
         TMDB_API_KEY=str(coverart.get("tmdb_api_key", "") or ""),
         FANARTTV_API_KEY=str(coverart.get("fanarttv_api_key", "") or ""),

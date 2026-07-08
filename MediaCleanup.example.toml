@@ -7,24 +7,28 @@
 #
 # MediaCleanup.toml is git-ignored on purpose — it holds your private API keys.
 # Paths use TOML literal strings (single quotes) so backslashes need no escaping.
+# RELATIVE paths resolve against the script folder — the defaults below work
+# out of the box once you drop the tools into runtimes\ (see runtimes\README.md).
 
 [tools]
 # Folder containing the MKVToolNix binaries (mkvmerge.exe, mkvpropedit.exe, ...)
-# Download: https://mkvtoolnix.download/
-mkvtoolnix_dir = 'C:\Program Files\MKVToolNix'
+# Download the PORTABLE build: https://mkvtoolnix.download/downloads.html#windows
+# and extract it into runtimes\mkvtoolnix — or point this at a system install.
+mkvtoolnix_dir = 'runtimes\mkvtoolnix'
+# Installed alternative: mkvtoolnix_dir = 'C:\Program Files\MKVToolNix'
 
 # Optional per-tool overrides. When omitted, each tool is resolved
 # inside mkvtoolnix_dir using its standard name:
-# mkvmerge    = 'C:\Program Files\MKVToolNix\mkvmerge.exe'
-# mkvpropedit = 'C:\Program Files\MKVToolNix\mkvpropedit.exe'
-# mkvinfo     = 'C:\Program Files\MKVToolNix\mkvinfo.exe'
-# mkvextract  = 'C:\Program Files\MKVToolNix\mkvextract.exe'
+# mkvmerge    = 'runtimes\mkvtoolnix\mkvmerge.exe'
+# mkvpropedit = 'runtimes\mkvtoolnix\mkvpropedit.exe'
+# mkvinfo     = 'runtimes\mkvtoolnix\mkvinfo.exe'
+# mkvextract  = 'runtimes\mkvtoolnix\mkvextract.exe'
 
 [filebot]
 # Optional. If 'exe' is omitted or the file does not exist, the script runs
 # without FileBot (renaming falls back to built-in filename heuristics).
-# Installed:              exe = 'C:\Program Files\FileBot\filebot.exe'
-# Portable (recommended): exe = 'D:\Projects\MediaCleanup\runtimes\FileBot\filebot.exe'
+exe = 'runtimes\FileBot\filebot.exe'
+# Installed alternative: exe = 'C:\Program Files\FileBot\filebot.exe'
 db = "TheMovieDB"
 
 [paths]

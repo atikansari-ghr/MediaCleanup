@@ -8,6 +8,8 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
 TOML tip: use **single-quoted literal strings** for Windows paths — backslashes need no escaping: `movies_root = 'D:\Media\Movies'`.
 
+**Relative paths resolve against the script folder** (not your current directory). The example config uses `runtimes\mkvtoolnix` and `runtimes\FileBot\filebot.exe`, so a fresh clone works as soon as the tools are dropped into `runtimes\` — see [runtimes/README.md](../runtimes/README.md). Absolute paths are used as-is.
+
 ---
 
 ## `[tools]`

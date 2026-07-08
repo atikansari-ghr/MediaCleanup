@@ -2,8 +2,16 @@
 # Share MediaCleanup.example.toml instead.
 MediaCleanup.toml
 
-# Bundled tool binaries (users install their own MKVToolNix/FileBot/ffmpeg)
-runtimes/
+# Bundled tool binaries (users drop their own MKVToolNix/FileBot in here).
+# The folder skeleton + README are committed; every binary stays ignored.
+runtimes/*
+!runtimes/README.md
+!runtimes/mkvtoolnix/
+runtimes/mkvtoolnix/*
+!runtimes/mkvtoolnix/.gitkeep
+!runtimes/FileBot/
+runtimes/FileBot/*
+!runtimes/FileBot/.gitkeep
 runtime/
 
 # Local working files
