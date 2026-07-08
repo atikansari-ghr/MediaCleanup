@@ -1,6 +1,6 @@
-# MediaCleanup Enhanced — Configuration Reference
+# MediaCleanup — Configuration Reference
 
-All configuration lives in **`MediaCleanup.toml`**, which must sit in the same folder as `MediaCleanup_Enhanced.py`. The script resolves it relative to its own location, so it works no matter which directory you run from.
+All configuration lives in **`MediaCleanup.toml`**, which must sit in the same folder as `MediaCleanup.py`. The script resolves it relative to its own location, so it works no matter which directory you run from.
 
 Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
@@ -46,7 +46,7 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 
 API keys used by **both** `--coverart` (poster fetching) and rich metadata tagging (genre/director/actors/synopsis embedded during tag cleaning). All keys optional — an empty value disables that source. With no keys at all, `--coverart` still works using local poster files only, and tag cleaning writes basic tags.
 
-Verify your keys anytime with `python MediaCleanup_Enhanced.py --validate-keys`.
+Verify your keys anytime with `python MediaCleanup.py --validate-keys`.
 
 > Watch the key formats: TMDB and fanart.tv keys are 32 hex characters; OMDb keys are 8. If validation says a key is invalid, check you didn't swap them.
 

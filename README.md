@@ -1,4 +1,10 @@
-# MediaCleanup Enhanced
+# MediaCleanup
+
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
+![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
+![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
 
 Windows MKV media cleanup, merge, and tagging tool built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding.
 
@@ -10,6 +16,22 @@ Plus two standalone maintenance modes:
 
 - `--cleantags` — strip promotional/watermark tags, attachments, and junk track names in-place, no remux.
 - `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art.
+- `--rename` — FileBot-rename messy downloads into a canonical format, with full undo.
+- `--subtitles` — download missing subtitles from OpenSubtitles as sidecar `.srt` files.
+
+## In action
+
+Rename messy downloads with a safe preview first — real database lookups, exact proposed names:
+
+![Rename preview](docs/images/rename-preview.svg)
+
+Embed cover art across the library — every poster audited in an HTML review gallery:
+
+![Cover art run](docs/images/coverart.svg)
+
+Verify your API keys before spending any quota:
+
+![API key validation](docs/images/validate-keys.svg)
 
 ## Requirements
 
@@ -33,28 +55,28 @@ copy MediaCleanup.example.toml MediaCleanup.toml
 notepad MediaCleanup.toml
 
 :: 3. Validate tools and folders
-python MediaCleanup_Enhanced.py --self-check
+python MediaCleanup.py --self-check
 
 :: 4. Preview what would happen (nothing is written)
-python MediaCleanup_Enhanced.py --dry-run --verbose
+python MediaCleanup.py --dry-run --verbose
 
 :: 5. Run
-python MediaCleanup_Enhanced.py
+python MediaCleanup.py
 ```
 
 ## Common commands
 
 ```bat
-python MediaCleanup_Enhanced.py --movies                          :: movies only
-python MediaCleanup_Enhanced.py --tv                              :: TV only
-python MediaCleanup_Enhanced.py --movies --input "D:\Downloads"   :: specific folder
-python MediaCleanup_Enhanced.py --audio-langs Telugu Hindi        :: keep only these languages
-python MediaCleanup_Enhanced.py --cleantags                       :: clean tags in-place, no remux
-python MediaCleanup_Enhanced.py --coverart                        :: embed cover art in-place
-python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
-python MediaCleanup_Enhanced.py --subtitles                       :: download missing sidecar subs
-python MediaCleanup_Enhanced.py --validate-keys                   :: test all configured API keys
-python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
+python MediaCleanup.py --movies                          :: movies only
+python MediaCleanup.py --tv                              :: TV only
+python MediaCleanup.py --movies --input "D:\Downloads"   :: specific folder
+python MediaCleanup.py --audio-langs Telugu Hindi        :: keep only these languages
+python MediaCleanup.py --cleantags                       :: clean tags in-place, no remux
+python MediaCleanup.py --coverart                        :: embed cover art in-place
+python MediaCleanup.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
+python MediaCleanup.py --subtitles                       :: download missing sidecar subs
+python MediaCleanup.py --validate-keys                   :: test all configured API keys
+python MediaCleanup.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
 ```
 
 ## Output naming

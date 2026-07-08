@@ -1,6 +1,6 @@
-# MediaCleanup Enhanced — Usage Guide
+# MediaCleanup — Usage Guide
 
-Full reference for running `MediaCleanup_Enhanced.py`. For configuration file details see [CONFIGURATION.md](CONFIGURATION.md).
+Full reference for running `MediaCleanup.py`. For configuration file details see [CONFIGURATION.md](CONFIGURATION.md).
 
 ---
 
@@ -8,7 +8,7 @@ Full reference for running `MediaCleanup_Enhanced.py`. For configuration file de
 
 1. Install Python 3.11+ and [MKVToolNix](https://mkvtoolnix.download/).
 2. Copy `MediaCleanup.example.toml` to `MediaCleanup.toml` (same folder as the script) and edit the paths.
-3. Validate: `python MediaCleanup_Enhanced.py --self-check`
+3. Validate: `python MediaCleanup.py --self-check`
 
 All folder locations (media roots, tool paths) live in `MediaCleanup.toml` — the script has no hardcoded paths.
 
@@ -20,23 +20,23 @@ All folder locations (media roots, tool paths) live in `MediaCleanup.toml` — t
 
 ```bat
 :: Full pipeline (Movies + TV)
-python MediaCleanup_Enhanced.py
-python MediaCleanup_Enhanced.py --dry-run --verbose
+python MediaCleanup.py
+python MediaCleanup.py --dry-run --verbose
 
 :: One pipeline only
-python MediaCleanup_Enhanced.py --movies
-python MediaCleanup_Enhanced.py --tv
+python MediaCleanup.py --movies
+python MediaCleanup.py --tv
 
 :: Custom input folder
-python MediaCleanup_Enhanced.py --movies --input "D:\Downloads\NewMovies"
+python MediaCleanup.py --movies --input "D:\Downloads\NewMovies"
 
 :: Standalone modes (in-place, no remux)
-python MediaCleanup_Enhanced.py --cleantags
-python MediaCleanup_Enhanced.py --coverart
+python MediaCleanup.py --cleantags
+python MediaCleanup.py --coverart
 
 :: Language control
-python MediaCleanup_Enhanced.py --movies --audio-langs Telugu Hindi
-python MediaCleanup_Enhanced.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 English
+python MediaCleanup.py --movies --audio-langs Telugu Hindi
+python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 English
 ```
 
 ---
@@ -115,16 +115,16 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 
 ```bat
 :: Backfill the whole library (skips files that already have covers)
-python MediaCleanup_Enhanced.py --coverart
+python MediaCleanup.py --coverart
 
 :: One show only
-python MediaCleanup_Enhanced.py --coverart --tv --input "D:\Media\TV\Show Name (2008)"
+python MediaCleanup.py --coverart --tv --input "D:\Media\TV\Show Name (2008)"
 
 :: Replace existing covers in a folder
-python MediaCleanup_Enhanced.py --coverart --movies --input "D:\Media\Fixed" --coverart-overwrite
+python MediaCleanup.py --coverart --movies --input "D:\Media\Fixed" --coverart-overwrite
 
 :: Preview (offline — no API calls)
-python MediaCleanup_Enhanced.py --coverart --dry-run --verbose
+python MediaCleanup.py --coverart --dry-run --verbose
 ```
 
 To hand-pick art for one movie: drop a `poster.jpg` in its folder and run `--coverart` (with `--coverart-overwrite` if a cover is already embedded).
@@ -150,13 +150,13 @@ A full season costs one show lookup + one season lookup total (cached per run), 
 
 ```bat
 :: Verify keys first
-python MediaCleanup_Enhanced.py --validate-keys
+python MediaCleanup.py --validate-keys
 
 :: Enrich an already-processed library
-python MediaCleanup_Enhanced.py --cleantags --input "D:\Media\Fixed"
+python MediaCleanup.py --cleantags --input "D:\Media\Fixed"
 
 :: Clean tags the old way (offline, no metadata)
-python MediaCleanup_Enhanced.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
+python MediaCleanup.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
 ```
 
 > Note: Plex/Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC/MPC-HC/Kodi and archival self-containment — the file carries its metadata forever, independent of any server.
@@ -169,19 +169,19 @@ python MediaCleanup_Enhanced.py --cleantags --no-fetch-tags --input "D:\Media\Fi
 
 ```bat
 :: Preview (FileBot's test mode shows the actual proposed names)
-python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads" --dry-run
+python MediaCleanup.py --rename --movies --input "D:\Downloads" --dry-run
 
 :: Rename in place
-python MediaCleanup_Enhanced.py --rename --movies --input "D:\Downloads"
+python MediaCleanup.py --rename --movies --input "D:\Downloads"
 
 :: Rename AND organize into the library (Movies\Title (Year)\..., TV\Show\Season XX\...)
-python MediaCleanup_Enhanced.py --rename --tv --input "D:\Downloads\Show.S01.Complete" --rename-into
+python MediaCleanup.py --rename --tv --input "D:\Downloads\Show.S01.Complete" --rename-into
 
 :: Fix mislabeled 'und' audio first so the [language] bracket comes out right
-python MediaCleanup_Enhanced.py --rename --tv --input "D:\Downloads\Show" --force-audio-lang 1 Hindi
+python MediaCleanup.py --rename --tv --input "D:\Downloads\Show" --force-audio-lang 1 Hindi
 
 :: Changed your mind? Revert the last batch
-python MediaCleanup_Enhanced.py --rename-undo
+python MediaCleanup.py --rename-undo
 ```
 
 Details: requires exactly one of `--movies`/`--tv` (different databases + formats); the DB lookup uses a cleaned title query so release junk in the filename doesn't mislead it; every rename is appended to `logs\rename_history.csv`; `--rename-undo` reverts the most recent batch (skipping files that moved since) and removes it from the history. Note the language bracket in the new name reflects the audio tags *inside* the file — fix `und` tracks with the force flags or the bracket may be wrong.
@@ -199,13 +199,13 @@ Details: requires exactly one of `--movies`/`--tv` (different databases + format
 
 ```bat
 :: See what's missing (offline, no quota spent)
-python MediaCleanup_Enhanced.py --subtitles --dry-run
+python MediaCleanup.py --subtitles --dry-run
 
 :: Download for one show
-python MediaCleanup_Enhanced.py --subtitles --tv --input "D:\Media\TV\Show Name (2006)"
+python MediaCleanup.py --subtitles --tv --input "D:\Media\TV\Show Name (2006)"
 
 :: Whole library
-python MediaCleanup_Enhanced.py --subtitles
+python MediaCleanup.py --subtitles
 ```
 
 ---
@@ -219,10 +219,10 @@ Hindi-dubbed releases often tag audio as `und` with a generic name like "2 chann
 runtimes\mkvtoolnix\mkvmerge.exe -J "D:\Media\TV\Show\episode.mkv"
 
 :: Step 2 — dry-run with the override
-python MediaCleanup_Enhanced.py --tv --input "D:\Media\TV\Show" --force-audio-lang 1 Hindi --dry-run --verbose
+python MediaCleanup.py --tv --input "D:\Media\TV\Show" --force-audio-lang 1 Hindi --dry-run --verbose
 
 :: Step 3 — apply
-python MediaCleanup_Enhanced.py --tv --input "D:\Media\TV\Show" --force-audio-lang 1 Hindi
+python MediaCleanup.py --tv --input "D:\Media\TV\Show" --force-audio-lang 1 Hindi
 ```
 
 The override applies to every file in the scanned folder, and the corrected language tag is written into the MKV via mkvpropedit.
@@ -233,25 +233,25 @@ The override applies to every file in the scanned folder, and the corrected lang
 
 ```bat
 :: Process a new movie dropped in Downloads
-python MediaCleanup_Enhanced.py --movies --input "D:\Downloads"
+python MediaCleanup.py --movies --input "D:\Downloads"
 
 :: Keep only Telugu and Hindi audio (drop English)
-python MediaCleanup_Enhanced.py --movies --audio-langs Telugu Hindi
+python MediaCleanup.py --movies --audio-langs Telugu Hindi
 
 :: Re-clean tags on already-processed files (no remux)
-python MediaCleanup_Enhanced.py --cleantags --movies --input "D:\Media\Fixed"
+python MediaCleanup.py --cleantags --movies --input "D:\Media\Fixed"
 
 :: Add cover art to everything processed so far
-python MediaCleanup_Enhanced.py --coverart --input "D:\Media\Fixed"
+python MediaCleanup.py --coverart --input "D:\Media\Fixed"
 
 :: Fix "und" audio + subtitle across a season
-python MediaCleanup_Enhanced.py --tv --input "D:\Media\TV\Show Season 1" --force-audio-lang 1 Hindi --force-sub-lang 2 English
+python MediaCleanup.py --tv --input "D:\Media\TV\Show Season 1" --force-audio-lang 1 Hindi --force-sub-lang 2 English
 
 :: Loose grouping when variant filenames differ a lot
-python MediaCleanup_Enhanced.py --movies --similarity-threshold 0.80
+python MediaCleanup.py --movies --similarity-threshold 0.80
 
 :: Full run, verbose, logged to file
-python MediaCleanup_Enhanced.py --verbose --log-file "logs\run.log"
+python MediaCleanup.py --verbose --log-file "logs\run.log"
 ```
 
 ---

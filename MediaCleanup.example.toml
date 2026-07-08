@@ -1,7 +1,7 @@
 # MediaCleanup configuration — TEMPLATE
 #
 # Setup:
-#   1. Copy this file to MediaCleanup.toml (same folder as MediaCleanup_Enhanced.py).
+#   1. Copy this file to MediaCleanup.toml (same folder as MediaCleanup.py).
 #   2. Edit the paths below to match your system.
 #   3. (Optional) Add API keys under [coverart] to enable online poster fetching.
 #
