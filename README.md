@@ -33,6 +33,21 @@ Verify your API keys before spending any quota:
 
 ![API key validation](docs/images/validate-keys.svg)
 
+## How it works
+
+```mermaid
+flowchart LR
+    A[/"Messy downloads"/] --> B["Scan & group<br/>variant releases"]
+    B --> C["Pick best video<br/>(HEVC preferred)"]
+    B --> D["Collect ALL target-language<br/>audio & subtitles"]
+    C --> E["Remux into one clean MKV<br/>(atomic — sources untouched)"]
+    D --> E
+    B -.->|"already clean:<br/>skip remux"| F
+    E --> F["Clean tags & embed<br/>metadata + cover art"]
+    F --> G["FileBot rename to<br/>canonical format"]
+    G --> H[/"Plex / Jellyfin-ready library"/]
+```
+
 ## Requirements
 
 | Requirement | Notes |
