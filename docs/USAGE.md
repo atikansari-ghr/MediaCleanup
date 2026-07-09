@@ -72,6 +72,8 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | Flag | Meaning |
 |---|---|
 | `--overwrite` | Overwrite existing output files. Default: fail the item if output exists. |
+| `--inplace` | Remuxed output **replaces the source file(s)** in their own folder instead of going to `output_root`. The output is verified (track counts + duration) before any source is touched; multi-file merges consume **all** variants. |
+| `--backup` | With `--inplace`: keep each consumed source as `<name>.original.mkv` next to the new file. Backups are invisible to all scans. Recovery: delete the new file, strip `.original` from the backup's name. |
 | `--audio-langs LANG...` | Keep only a subset of your configured `[languages]` targets for this run (names or ISO codes, case-insensitive). Default: all targets when present. |
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
@@ -304,5 +306,5 @@ Non-fatal — mkvpropedit exits 1 when a property being deleted doesn't exist. C
 **Resolution tag looks wrong (e.g. 720p on a 480p file)**
 Resolution is inferred from video width, snapped to the nearest of 3840/1920/1280. Run `--verbose` to see the dimensions mkvmerge reports.
 
-**ToFix (work) folder not cleaned up**
-Working copies are only deleted after a successful output. Files from failed runs remain for inspection; re-run (with `--overwrite` if needed) and they'll be cleaned on success.
+**Where did the ToFix folder go?**
+Remuxing now reads sources directly (mkvmerge never modifies its inputs) — the working-copy mirror was removed, halving remux I/O and disk usage. `work_root` in old configs is accepted but ignored.

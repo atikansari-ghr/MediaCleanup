@@ -33,13 +33,13 @@ TOML tip: use **single-quoted literal strings** for Windows paths — backslashe
 
 ## `[paths]`
 
-All four are **required**.
+`movies_root`, `tv_root`, and `output_root` are **required** (`output_root` is unused in `--inplace` runs).
 
 | Key | Description |
 |---|---|
 | `movies_root` | Source movies folder, scanned recursively for `.mkv`. |
 | `tv_root` | Source TV folder, scanned recursively. |
-| `work_root` | Working-copy folder. Sources are mirrored here before remuxing; copies are auto-deleted after success. Needs free space ≥ the largest movie group being processed. |
+| `work_root` | **Legacy — ignored.** Remuxing reads sources directly (mkvmerge never modifies its inputs). Old configs keep working; the key can be removed. |
 | `output_root` | Output folder. Remuxed files land here, mirroring the source folder structure. |
 
 The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run without editing the TOML.

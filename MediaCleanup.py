@@ -327,7 +327,9 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         FILEBOT_EXE=filebot_exe,
         MOVIES_ROOT=as_path(required(paths, "paths", "movies_root")),
         TV_ROOT=as_path(required(paths, "paths", "tv_root")),
-        WORK_ROOT=as_path(required(paths, "paths", "work_root")),
+        # work_root is legacy (remuxing now reads sources directly) — accepted
+        # for backward compatibility but never used or created.
+        WORK_ROOT=as_path(str(paths["work_root"])) if paths.get("work_root") else (_SCRIPT_DIR / "logs" / "work"),
         OUTPUT_ROOT=as_path(required(paths, "paths", "output_root")),
         FILEBOT_DB=str(filebot.get("db", "TheMovieDB")),
         TMDB_API_KEY=str(coverart.get("tmdb_api_key", "") or ""),
@@ -857,7 +859,7 @@ def mkvmerge_identify_json(mkv_path: Path) -> Dict[str, Any]:
 
 
 # =========================
-# Working copy system
+# Hashing & in-place remux helpers
 # =========================
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -871,48 +873,60 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-def ensure_working_copy(src: Path, work_dst: Path, dry_run: bool) -> Path:
+def _container_duration_s(meta: Dict[str, Any]) -> Optional[float]:
+    dur = ((meta.get("container") or {}).get("properties") or {}).get("duration")
+    try:
+        return float(dur) / 1_000_000_000.0 if dur else None  # mkvmerge reports ns
+    except (TypeError, ValueError):
+        return None
+
+
+def verify_remux_output(out_tmp: Path, ref_file: Path,
+                        expected_audio: int, expected_subs: int) -> Tuple[bool, str]:
     """
-    Copies src into work_dst if needed. Reuses existing if unchanged (size+mtime),
-    optionally hash-verified on mtime mismatch.
+    Safety gate before an --inplace swap: the freshly-merged output must contain
+    exactly the selected tracks and match the reference video source's duration
+    (±2% or ±2s). On any doubt the caller keeps the sources and discards the tmp.
     """
-    work_dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not out_tmp.exists() or out_tmp.stat().st_size < 4096:
+            return False, "output missing or implausibly small"
+        meta = mkvmerge_identify_json(out_tmp)
+        kinds = [str(t.get("type")) for t in meta.get("tracks", [])]
+        n_video, n_audio, n_subs = kinds.count("video"), kinds.count("audio"), kinds.count("subtitles")
+        if n_video != 1 or n_audio != expected_audio or n_subs != expected_subs:
+            return False, (f"track mismatch: got video={n_video} audio={n_audio} subs={n_subs}, "
+                           f"expected video=1 audio={expected_audio} subs={expected_subs}")
+        out_dur = _container_duration_s(meta)
+        ref_dur = _container_duration_s(mkvmerge_identify_json(ref_file))
+        if out_dur and ref_dur:
+            if abs(out_dur - ref_dur) > max(2.0, ref_dur * 0.02):
+                return False, f"duration mismatch: output {out_dur:.1f}s vs source {ref_dur:.1f}s"
+        return True, "ok"
+    except Exception as e:
+        return False, f"verification error: {e}"
 
-    if dry_run:
-        logging.info("[DRY] Would ensure working copy: %s -> %s", src, work_dst)
-        return work_dst
 
-    if work_dst.exists():
-        s_stat = src.stat()
-        w_stat = work_dst.stat()
-        if s_stat.st_size == w_stat.st_size and int(s_stat.st_mtime) == int(w_stat.st_mtime):
-            logging.debug("Working copy reused (size+mtime match): %s", work_dst)
-            return work_dst
-
-        if s_stat.st_size == w_stat.st_size and CFG.HASH_ON_MTIME_MISMATCH:
-            try:
-                s_hash = sha256_file(src)
-                w_hash = sha256_file(work_dst)
-                if s_hash == w_hash:
-                    # Align timestamps to avoid repeated hashing
-                    os.utime(work_dst, (s_stat.st_atime, s_stat.st_mtime))
-                    logging.debug("Working copy reused (hash match): %s", work_dst)
-                    return work_dst
-            except Exception as e:
-                logging.warning("Hash verify failed; recopying. (%s)", e)
-
-        logging.info("Working copy differs; recopying: %s", work_dst)
-
-    tmp = work_dst.with_suffix(work_dst.suffix + ".copytmp")
-    if tmp.exists():
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-
-    shutil.copy2(win_long_path(src), win_long_path(tmp))
-    os.replace(win_long_path(tmp), win_long_path(work_dst))
-    return work_dst
+def finalize_inplace(sources: List[Path], out_tmp: Path, out_final: Path, backup: bool) -> None:
+    """
+    Complete an --inplace remux: back up (as *.original.mkv) or delete every
+    consumed source, then move the verified output onto its final name.
+    Only called AFTER verify_remux_output has passed.
+    """
+    for s in sources:
+        if not s.exists():
+            continue
+        if backup:
+            b = s.with_suffix(".original.mkv")
+            if b.exists():
+                b.unlink()  # stale backup from an earlier run
+            os.replace(win_long_path(s), win_long_path(b))
+            logging.info("Original backed up: %s", b.name)
+        else:
+            s.unlink()
+            logging.info("Original deleted (consumed by merge): %s", s.name)
+    out_final.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(win_long_path(out_tmp), win_long_path(out_final))
 
 
 # =========================
@@ -925,7 +939,8 @@ def scan_mkvs(root: Path) -> List[Path]:
         return []
     out: List[Path] = []
     for p in root.rglob("*.mkv"):
-        if p.is_file():
+        # *.original.mkv are --inplace --backup safety copies — never process them.
+        if p.is_file() and not p.name.lower().endswith(".original.mkv"):
             out.append(p)
     return out
 
@@ -1755,52 +1770,6 @@ def file_has_all_target_langs(
     target = set(audio_lang_filter) if audio_lang_filter else set(CFG.LANG_CANONICAL_ORDER)
     found  = set(audios_found.keys())
     return target.issubset(found)
-
-
-def cleanup_working_copies(work_files: List[Path], dry_run: bool) -> None:
-    """
-    Delete working copy files from WORK_ROOT and prune any empty parent
-    directories up to (but not including) WORK_ROOT itself.
-    Only called on successful processing.
-    """
-    for wf in work_files:
-        if not wf.exists():
-            continue
-        # Safety: only delete files that live under WORK_ROOT
-        try:
-            wf.relative_to(CFG.WORK_ROOT)
-        except ValueError:
-            logging.warning("Working copy outside WORK_ROOT, skipping delete: %s", wf)
-            continue
-        if dry_run:
-            logging.info("[DRY] Would delete working copy: %s", wf)
-            continue
-        try:
-            wf.unlink()
-            logging.debug("Deleted working copy: %s", wf)
-        except Exception as e:
-            logging.warning("Could not delete working copy %s: %s", wf, e)
-
-    if dry_run:
-        return
-
-    # Prune empty parent directories up to (not including) WORK_ROOT
-    dirs_to_check: set[Path] = set()
-    for wf in work_files:
-        try:
-            wf.relative_to(CFG.WORK_ROOT)
-        except ValueError:
-            continue
-        dirs_to_check.add(wf.parent)
-
-    for d in sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True):
-        while d != CFG.WORK_ROOT and d.is_dir():
-            try:
-                d.rmdir()  # only succeeds if empty
-                logging.debug("Removed empty work dir: %s", d)
-            except OSError:
-                break  # not empty or permission issue — stop climbing
-            d = d.parent
 
 
 def atomic_move(src_tmp: Path, dst_final: Path, overwrite: bool) -> None:
@@ -4164,11 +4133,6 @@ def output_path_for_item(src_item: Path, root: Path, new_filename: str) -> Path:
     return CFG.OUTPUT_ROOT / rel.parent / new_filename
 
 
-def working_path_for_item(src_item: Path, root: Path) -> Path:
-    rel = compute_relpath_under_root(src_item, root)
-    return CFG.WORK_ROOT / rel
-
-
 def build_movie_output_name(
     movie_name: str,
     year: Optional[str],
@@ -4213,48 +4177,37 @@ def process_movie_group(
     skip_cleantags: bool = False,
     force_audio_langs: Optional[Dict[int, str]] = None,
     force_sub_langs: Optional[Dict[int, str]] = None,
+    inplace: bool = False,
+    backup: bool = False,
 ) -> Result:
     """
-    ENHANCED: Process a group of similar movie files.
-    
+    Process a group of similar movie files.
+
     When multiple files are found:
     - Select the best x265/HEVC video track from any file
-    - Collect ALL Hindi, Telugu, and English audio tracks from ALL files (other languages excluded)
-    - Select the best English subtitle
+    - Collect ALL target-language audio tracks from ALL files (others excluded)
+    - Keep target-language subtitles (regular + SDH)
     - Merge everything into a single optimized MKV file
-    
-    Audio tracks in other languages (e.g., Japanese, French, Spanish) are NOT included.
+
+    Sources are READ directly (mkvmerge never modifies its inputs). Output goes
+    to OUTPUT_ROOT, or — with inplace=True — replaces the sources in their own
+    folder after verification (backup=True keeps them as *.original.mkv).
     """
     kind = "movie_cleanup" if len(group) == 1 else "movie_merge"
     try:
-        # Prepare working copies
-        work_map: Dict[Path, Path] = {}
-        work_files: List[Path] = []
-        for src in group:
-            work = working_path_for_item(src, movies_root)
-            work = ensure_working_copy(src, work, dry_run=dry_run)
-            work_map[src] = work
-            work_files.append(work)
-
-        # Identify tracks 
+        # Identify tracks (reading sources directly — identification is read-only)
         metas: Dict[Path, Tuple[List[Track], int]] = {}
         for src in group:
-            work = work_map[src]
-
-            # Use source size for tie-break; safe even if dry_run
+            # Use source size for tie-break
             fsize = src.stat().st_size if src.exists() else 0
+            meta = mkvmerge_identify_json(src)
 
-            if dry_run:
-                meta = mkvmerge_identify_json(work if work.exists() else src)
-            else:
-                meta = mkvmerge_identify_json(work)
-
-            tracks = extract_tracks(work, meta)
+            tracks = extract_tracks(src, meta)
             # Apply forced language overrides before any detection runs
             apply_track_lang_overrides(tracks, force_audio_langs or {}, force_sub_langs or {})
-            metas[work] = (tracks, fsize)
+            metas[src] = (tracks, fsize)
 
-        # Determine movie name/year/imdb (prefer FileBot-normalized working filename; fall back to heuristic)
+        # Determine movie name/year/imdb
         movie_name: str
         year: Optional[str]
         imdb_id: Optional[str]
@@ -4263,7 +4216,7 @@ def process_movie_group(
         year = None
         imdb_id = None
 
-        # Prefer parsing from FileBot-normalized working filenames: 'Name (Year) - tt1234567'
+        # Prefer parsing from canonically-named files: 'Name (Year) - tt1234567'
         for wf in metas.keys():
             t, y, imdb = parse_title_year_imdb_from_filename(wf)
             if t and y:
@@ -4316,8 +4269,6 @@ def process_movie_group(
                 src_file = group[0]
                 out_done = src_file
                 if not dry_run:
-                    # In-place path: working copies aren't needed — remove them.
-                    cleanup_working_copies(work_files, dry_run=False)
                     _single_tracks = metas[list(metas.keys())[0]][0]
                     fix_track_langs_inplace(src_file, _single_tracks, force_audio_langs or {}, force_sub_langs or {})
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
@@ -4347,8 +4298,6 @@ def process_movie_group(
                              src_file.name, _actual_audio_count, selected_audio_langs)
                 out_done = src_file
                 if not dry_run:
-                    # In-place path: working copies aren't needed — remove them.
-                    cleanup_working_copies(work_files, dry_run=False)
                     _single_tracks = metas[list(metas.keys())[0]][0]
                     fix_track_langs_inplace(src_file, _single_tracks, force_audio_langs or {}, force_sub_langs or {})
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
@@ -4397,7 +4346,15 @@ def process_movie_group(
 
         out_name = build_movie_output_name(movie_name, year, imdb_id, res_tag, source_tag, codec_tag, selected_audio_langs)
 
-        out_final = output_path_for_item(group[0], movies_root, out_name)
+        # --inplace: the merged file lands in the sources' own folder (they are
+        # co-located — grouping never crosses folders). Otherwise: OUTPUT_ROOT.
+        if inplace:
+            out_final = group[0].parent / out_name
+            if out_final.exists() and out_final not in group and not overwrite:
+                return Result(kind=kind, source_items=group, output_path=None, ok=False,
+                              reason=f"in-place output name collides with an unrelated file: {out_final.name}")
+        else:
+            out_final = output_path_for_item(group[0], movies_root, out_name)
 
         out_done = out_final
 
@@ -4457,9 +4414,22 @@ def process_movie_group(
             return Result(kind=kind, source_items=group, output_path=None, ok=False,
                           reason=f"mkvmerge failed rc={r.rc}", details={"stderr": r.err, "cmd": r.cmd})
 
+        if dry_run and inplace:
+            for s in group:
+                logging.info("[DRY] Would %s source: %s", "back up as *.original.mkv" if backup else "DELETE", s.name)
+
         if not dry_run:
-            atomic_move(out_tmp, out_final, overwrite=overwrite)
-            cleanup_working_copies(work_files, dry_run=False)
+            if inplace:
+                total_audio = sum(len(v) for v in audios.values())
+                ok_v, why = verify_remux_output(out_tmp, ref_file=best_video_file,
+                                                expected_audio=total_audio, expected_subs=total_subs)
+                if not ok_v:
+                    out_tmp.unlink(missing_ok=True)
+                    return Result(kind=kind, source_items=group, output_path=None, ok=False,
+                                  reason=f"in-place verification FAILED ({why}) — sources untouched")
+                finalize_inplace(sources=group, out_tmp=out_tmp, out_final=out_final, backup=backup)
+            else:
+                atomic_move(out_tmp, out_final, overwrite=overwrite)
 
         out_done = out_final
 
@@ -4643,29 +4613,25 @@ def process_tv_file(
     skip_cleantags: bool = False,
     force_audio_langs: Optional[Dict[int, str]] = None,
     force_sub_langs: Optional[Dict[int, str]] = None,
+    inplace: bool = False,
+    backup: bool = False,
 ) -> Result:
     """
     Process a single TV episode file.
-    Uses the original logic (best single track per language).
+
+    The source is READ directly (mkvmerge never modifies its inputs). Output
+    goes to OUTPUT_ROOT, or — with inplace=True — replaces the source in its
+    own folder after verification (backup=True keeps it as *.original.mkv).
     """
     kind = "tv_cleanup"
     try:
-        work = working_path_for_item(src, tv_root)
-        work = ensure_working_copy(src, work, dry_run=dry_run)
-
         fsize = src.stat().st_size if src.exists() else 0
-        if dry_run:
-            if work.exists():
-                meta = mkvmerge_identify_json(work)
-            else:
-                meta = mkvmerge_identify_json(src)
-        else:
-            meta = mkvmerge_identify_json(work)
+        meta = mkvmerge_identify_json(src)
 
-        tracks = extract_tracks(work, meta)
+        tracks = extract_tracks(src, meta)
         # Apply forced language overrides before any detection runs
         apply_track_lang_overrides(tracks, force_audio_langs or {}, force_sub_langs or {})
-        metas = {work: (tracks, fsize)}
+        metas = {src: (tracks, fsize)}
 
         show_name, season_str, ep_str, ep_title = infer_tv_components(src)
 
@@ -4697,8 +4663,6 @@ def process_tv_file(
                             "/".join(CFG.LANG_DISPLAY_MAP.values()), src.name)
             out_done = src
             if not dry_run:
-                if work.exists() and work != src:
-                    cleanup_working_copies([work], dry_run=False)
                 fix_track_langs_inplace(src, tracks, force_audio_langs or {}, force_sub_langs or {})
                 if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
                     ct = clean_mkv_tags(src, dry_run=False, is_tv=True)
@@ -4727,8 +4691,6 @@ def process_tv_file(
             out_done = src
 
             if not dry_run:
-                if work.exists() and work != src:
-                    cleanup_working_copies([work], dry_run=False)
                 fix_track_langs_inplace(src, tracks, force_audio_langs or {}, force_sub_langs or {})
                 if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists():
                     logging.info("Auto-cleantags (pre-FileBot, in-place) on: %s", src.name)
@@ -4760,12 +4722,20 @@ def process_tv_file(
         # ─────────────────────────────────────────────────────────────────────
 
         out_name = build_tv_output_name(show_name, season_str, ep_str, ep_title, res_tag, codec_tag, selected_audio_langs)
-        out_final = output_path_for_item(src, tv_root, out_name)
+
+        # --inplace: output replaces the episode in its own folder; else OUTPUT_ROOT.
+        if inplace:
+            out_final = src.parent / out_name
+            if out_final.exists() and out_final != src and not overwrite:
+                return Result(kind=kind, source_items=[src], output_path=None, ok=False,
+                              reason=f"in-place output name collides with an unrelated file: {out_final.name}")
+        else:
+            out_final = output_path_for_item(src, tv_root, out_name)
 
         parts: List[Tuple[Path, Dict[str, Any]]] = []
 
         # Video
-        parts.append((work, {
+        parts.append((src, {
             "video_tracks": [best_v.id],
             "audio_tracks": None,
             "sub_tracks": None,
@@ -4812,9 +4782,21 @@ def process_tv_file(
             return Result(kind=kind, source_items=[src], output_path=None, ok=False,
                           reason=f"mkvmerge failed rc={r.rc}", details={"stderr": r.err, "cmd": r.cmd})
 
+        if dry_run and inplace:
+            logging.info("[DRY] Would %s source: %s", "back up as *.original.mkv" if backup else "DELETE", src.name)
+
         if not dry_run:
-            atomic_move(out_tmp, out_final, overwrite=overwrite)
-            cleanup_working_copies([work], dry_run=False)
+            if inplace:
+                total_audio = sum(len(v) for v in audios.values())
+                ok_v, why = verify_remux_output(out_tmp, ref_file=src,
+                                                expected_audio=total_audio, expected_subs=total_subs)
+                if not ok_v:
+                    out_tmp.unlink(missing_ok=True)
+                    return Result(kind=kind, source_items=[src], output_path=None, ok=False,
+                                  reason=f"in-place verification FAILED ({why}) — source untouched")
+                finalize_inplace(sources=[src], out_tmp=out_tmp, out_final=out_final, backup=backup)
+            else:
+                atomic_move(out_tmp, out_final, overwrite=overwrite)
 
         out_done = out_final
 
@@ -4891,7 +4873,7 @@ def self_check() -> int:
         logging.error("Self-check failed: tools: %s", e)
         return 2
 
-    for d in (CFG.MOVIES_ROOT, CFG.TV_ROOT, CFG.WORK_ROOT, CFG.OUTPUT_ROOT):
+    for d in (CFG.MOVIES_ROOT, CFG.TV_ROOT, CFG.OUTPUT_ROOT):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -4941,6 +4923,13 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="Enable verbose debug logging.")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1), help="Parallel workers.")
     ap.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs.")
+    ap.add_argument("--inplace", action="store_true",
+                    help="Remuxed output replaces the source file(s) in their own folder instead of "
+                         "going to output_root. The output is VERIFIED (track counts + duration) "
+                         "before any source is touched. Multi-file merges consume ALL variants.")
+    ap.add_argument("--backup", action="store_true",
+                    help="With --inplace: keep each consumed source as '<name>.original.mkv' next to "
+                         "the new file instead of deleting it. Backups are excluded from all scans.")
     ap.add_argument("--log-file", type=str, default="", help="Optional log file path.")
     
     # Selection flags:
@@ -5123,6 +5112,13 @@ def main() -> int:
         logging.error("Invalid arguments: %s are separate modes; run them one at a time.", " and ".join(modes))
         return 2
 
+    if args.backup and not args.inplace:
+        logging.error("--backup only makes sense together with --inplace.")
+        return 2
+    if (args.inplace or args.backup) and modes:
+        logging.error("--inplace/--backup apply to the main pipeline only, not to %s.", modes[0])
+        return 2
+
     # --rename-undo needs nothing else — do it and exit.
     if args.rename_undo:
         return run_rename_undo()
@@ -5275,12 +5271,12 @@ def main() -> int:
         print_results_table("Cover art results", ca_results)
         return 0 if bad_ca == 0 else 1
 
-    # Ensure work/output roots exist
-    for d in (CFG.WORK_ROOT, CFG.OUTPUT_ROOT):
+    # Ensure the output root exists (not needed for --inplace runs)
+    if not args.inplace:
         try:
-            d.mkdir(parents=True, exist_ok=True)
+            CFG.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            logging.error("Cannot access/create folder: %s | %s", d, e)
+            logging.error("Cannot access/create folder: %s | %s", CFG.OUTPUT_ROOT, e)
             return 3
 
     results: List[Result] = []
@@ -5320,14 +5316,14 @@ def main() -> int:
             futs.append(ex.submit(
                 process_movie_group, g, root, args.dry_run, args.overwrite,
                 args.include_forced_subs, audio_lang_filter, args.skip_cleantags,
-                force_audio_langs, force_sub_langs
+                force_audio_langs, force_sub_langs, args.inplace, args.backup
             ))
 
         for f in tv_files:
             futs.append(ex.submit(
                 process_tv_file, f, tv_root, args.dry_run, args.overwrite,
                 args.include_forced_subs, audio_lang_filter, args.skip_cleantags,
-                force_audio_langs, force_sub_langs
+                force_audio_langs, force_sub_langs, args.inplace, args.backup
             ))
 
         for fut in concurrent.futures.as_completed(futs):
@@ -5350,16 +5346,6 @@ def main() -> int:
             report = _write_coverart_report(_PIPELINE_COVERART["review_dir"], ca_results)
             if report:
                 logging.info("Cover art review: %s", report)
-
-    # Prune any leftover empty directories in WORK_ROOT (catches partial previous runs)
-    if not args.dry_run and CFG.WORK_ROOT.exists():
-        for d in sorted(CFG.WORK_ROOT.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-            if d.is_dir() and d != CFG.WORK_ROOT:
-                try:
-                    d.rmdir()
-                    logging.debug("Pruned empty work dir: %s", d)
-                except OSError:
-                    pass
 
     # Summary report
     elapsed = time.time() - started

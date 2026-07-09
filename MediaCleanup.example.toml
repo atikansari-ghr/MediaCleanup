@@ -34,7 +34,6 @@ db = "TheMovieDB"
 [paths]
 movies_root = 'D:\Media\Movies'   # source movies (scanned recursively)
 tv_root     = 'D:\Media\TV'       # source TV episodes
-work_root   = 'D:\Media\ToFix'    # working copies (auto-deleted on success)
 output_root = 'D:\Media\Fixed'    # remuxed output (mirrors source structure)
 
 [languages]

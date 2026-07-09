@@ -122,7 +122,7 @@ TV:      Show Name (2008) - S01E01 - Pilot - 1080p.x265 - [English].mkv
 
 ## Safety model
 
-- Source files are copied to a working folder before any remux; originals are untouched by the remux path.
+- Remux inputs are only ever **read** — output is built elsewhere and originals stay untouched (unless you explicitly opt into `--inplace`, which verifies the output before any source is replaced and offers `--backup`).
 - Output is written to a `.tmp` file, then atomically renamed into place.
 - `--dry-run` previews every action, including mkvmerge command lines, without writing anything.
 - In-place modes (`--cleantags`, `--coverart`, and the skip-remux fast path) edit metadata/attachments only — never the media streams.
