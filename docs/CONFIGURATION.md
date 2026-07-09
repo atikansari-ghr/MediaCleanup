@@ -48,7 +48,7 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 
 | Key | Required | Description |
 |---|---|---|
-| `targets` | No (default `["hin", "eng", "tel"]`) | Audio languages to **keep** — all others are stripped during remux. **List order = audio track order** in output files. Accepts ISO 639-2 codes, ISO 639-1 codes, or English names; ~40 languages supported (unknown values raise a config error listing them all). |
+| `targets` | No (default `["hin", "eng", "tel"]`) | Audio languages to **keep** — all others are stripped during remux. **List order = audio track order** in output files. Accepts every form — ISO 639-1 (`ko`), ISO 639-2 B/T (`kor`/`fra`), full English names (`Korean`) — against the complete built-in ISO 639 registry (189 languages). |
 
 Everything language-related derives from this list: track detection (including native-script track names for Indian languages), the display names in the filename `[...]` bracket, which subtitles are kept, what `--audio-langs`/`--force-audio-lang` accept, and the poster-language preference for cover art (English always first, then your targets). The video track language is set separately from the title's TMDB original language (override: `--force-video-lang`).
 

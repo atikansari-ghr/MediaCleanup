@@ -62,58 +62,278 @@ _CONSOLE: Optional["_RichConsole"] = None
 # Language table
 # =========================
 
-# Built-in language knowledge: ISO 639-2 (canonical key) -> (ISO 639-1, display name).
-# [languages] targets in MediaCleanup.toml are resolved against this table.
-_LANGUAGE_TABLE: Dict[str, Tuple[str, str]] = {
-    # Indian languages
-    "hin": ("hi", "Hindi"), "tel": ("te", "Telugu"), "tam": ("ta", "Tamil"),
-    "mal": ("ml", "Malayalam"), "kan": ("kn", "Kannada"), "ben": ("bn", "Bengali"),
-    "mar": ("mr", "Marathi"), "pan": ("pa", "Punjabi"), "guj": ("gu", "Gujarati"),
-    "urd": ("ur", "Urdu"), "ori": ("or", "Odia"), "nep": ("ne", "Nepali"),
-    "sin": ("si", "Sinhala"),
-    # European
-    "eng": ("en", "English"), "spa": ("es", "Spanish"), "fre": ("fr", "French"),
-    "ger": ("de", "German"), "ita": ("it", "Italian"), "por": ("pt", "Portuguese"),
-    "rus": ("ru", "Russian"), "dut": ("nl", "Dutch"), "pol": ("pl", "Polish"),
-    "swe": ("sv", "Swedish"), "nor": ("no", "Norwegian"), "dan": ("da", "Danish"),
-    "fin": ("fi", "Finnish"), "gre": ("el", "Greek"), "cze": ("cs", "Czech"),
-    "hun": ("hu", "Hungarian"), "rum": ("ro", "Romanian"), "ukr": ("uk", "Ukrainian"),
-    # Asian / Middle Eastern
-    "jpn": ("ja", "Japanese"), "kor": ("ko", "Korean"), "chi": ("zh", "Chinese"),
-    "ara": ("ar", "Arabic"), "tur": ("tr", "Turkish"), "tha": ("th", "Thai"),
-    "vie": ("vi", "Vietnamese"), "ind": ("id", "Indonesian"), "may": ("ms", "Malay"),
-    "heb": ("he", "Hebrew"), "per": ("fa", "Persian"), "fil": ("", "Filipino"),
+# Complete ISO 639 registry (generated from the ISO 639-2 standard: every
+# language with a 639-1 code, plus common 639-2/3-only media tags).
+# Line format: bibliographic-639-2 | terminological-639-2 (or empty) | 639-1 | English name
+_ISO639_DATA = """\
+aar||aa|Afar
+abk||ab|Abkhazian
+afr||af|Afrikaans
+aka||ak|Akan
+alb|sqi|sq|Albanian
+amh||am|Amharic
+ara||ar|Arabic
+arg||an|Aragonese
+arm|hye|hy|Armenian
+asm||as|Assamese
+ava||av|Avaric
+ave||ae|Avestan
+aym||ay|Aymara
+aze||az|Azerbaijani
+bak||ba|Bashkir
+bam||bm|Bambara
+baq|eus|eu|Basque
+bel||be|Belarusian
+ben||bn|Bengali
+bis||bi|Bislama
+bos||bs|Bosnian
+bre||br|Breton
+bul||bg|Bulgarian
+bur|mya|my|Burmese
+cat||ca|Catalan
+cha||ch|Chamorro
+che||ce|Chechen
+chi|zho|zh|Chinese
+chu||cu|Church Slavic
+chv||cv|Chuvash
+cmn|||Mandarin Chinese
+cor||kw|Cornish
+cos||co|Corsican
+cre||cr|Cree
+cze|ces|cs|Czech
+dan||da|Danish
+div||dv|Divehi
+dut|nld|nl|Dutch
+dzo||dz|Dzongkha
+eng||en|English
+epo||eo|Esperanto
+est||et|Estonian
+ewe||ee|Ewe
+fao||fo|Faroese
+fij||fj|Fijian
+fil|||Filipino
+fin||fi|Finnish
+fre|fra|fr|French
+fry||fy|Western Frisian
+ful||ff|Fulah
+geo|kat|ka|Georgian
+ger|deu|de|German
+gla||gd|Scottish Gaelic
+gle||ga|Irish
+glg||gl|Galician
+glv||gv|Manx
+gre|ell|el|Greek
+grn||gn|Guarani
+guj||gu|Gujarati
+hak|||Hakka Chinese
+hat||ht|Haitian
+hau||ha|Hausa
+hbs||sh|Serbo-Croatian
+heb||he|Hebrew
+her||hz|Herero
+hin||hi|Hindi
+hmo||ho|Hiri Motu
+hrv||hr|Croatian
+hun||hu|Hungarian
+ibo||ig|Igbo
+ice|isl|is|Icelandic
+ido||io|Ido
+iii||ii|Sichuan Yi
+iku||iu|Inuktitut
+ile||ie|Interlingue
+ina||ia|Interlingua
+ind||id|Indonesian
+ipk||ik|Inupiaq
+ita||it|Italian
+jav||jv|Javanese
+jpn||ja|Japanese
+kal||kl|Kalaallisut
+kan||kn|Kannada
+kas||ks|Kashmiri
+kau||kr|Kanuri
+kaz||kk|Kazakh
+khm||km|Khmer
+kik||ki|Kikuyu
+kin||rw|Kinyarwanda
+kir||ky|Kirghiz
+kom||kv|Komi
+kon||kg|Kongo
+kor||ko|Korean
+kua||kj|Kuanyama
+kur||ku|Kurdish
+lao||lo|Lao
+lat||la|Latin
+lav||lv|Latvian
+lim||li|Limburgan
+lin||ln|Lingala
+lit||lt|Lithuanian
+ltz||lb|Luxembourgish
+lub||lu|Luba-Katanga
+lug||lg|Ganda
+mac|mkd|mk|Macedonian
+mah||mh|Marshallese
+mal||ml|Malayalam
+mao|mri|mi|Maori
+mar||mr|Marathi
+may|msa|ms|Malay
+mlg||mg|Malagasy
+mlt||mt|Maltese
+mon||mn|Mongolian
+nan|||Min Nan Chinese
+nau||na|Nauru
+nav||nv|Navajo
+nbl||nr|South Ndebele
+nde||nd|North Ndebele
+ndo||ng|Ndonga
+nep||ne|Nepali
+nno||nn|Norwegian Nynorsk
+nob||nb|Norwegian Bokmål
+nor||no|Norwegian
+nya||ny|Chichewa
+oci||oc|Occitan
+oji||oj|Ojibwa
+ori||or|Odia
+orm||om|Oromo
+oss||os|Ossetian
+pan||pa|Punjabi
+per|fas|fa|Persian
+pli||pi|Pali
+pol||pl|Polish
+por||pt|Portuguese
+pus||ps|Pashto
+que||qu|Quechua
+roh||rm|Romansh
+rum|ron|ro|Romanian
+run||rn|Rundi
+rus||ru|Russian
+sag||sg|Sango
+san||sa|Sanskrit
+sin||si|Sinhala
+slo|slk|sk|Slovak
+slv||sl|Slovenian
+sme||se|Northern Sami
+smo||sm|Samoan
+sna||sn|Shona
+snd||sd|Sindhi
+som||so|Somali
+sot||st|Southern Sotho
+spa||es|Spanish
+srd||sc|Sardinian
+srp||sr|Serbian
+ssw||ss|Swati
+sun||su|Sundanese
+swa||sw|Swahili
+swe||sv|Swedish
+tah||ty|Tahitian
+tam||ta|Tamil
+tat||tt|Tatar
+tel||te|Telugu
+tgk||tg|Tajik
+tgl||tl|Tagalog
+tha||th|Thai
+tib|bod|bo|Tibetan
+tir||ti|Tigrinya
+ton||to|Tonga
+tsn||tn|Tswana
+tso||ts|Tsonga
+tuk||tk|Turkmen
+tur||tr|Turkish
+twi||tw|Twi
+uig||ug|Uighur
+ukr||uk|Ukrainian
+urd||ur|Urdu
+uzb||uz|Uzbek
+ven||ve|Venda
+vie||vi|Vietnamese
+vol||vo|Volapük
+wel|cym|cy|Welsh
+wln||wa|Walloon
+wol||wo|Wolof
+xho||xh|Xhosa
+yid||yi|Yiddish
+yor||yo|Yoruba
+yue|||Cantonese
+zha||za|Zhuang
+zul||zu|Zulu"""
+
+# Built-in language knowledge: ISO 639-2 bibliographic code (canonical key)
+# -> (ISO 639-1, display name). Parsed from the registry above.
+_LANGUAGE_TABLE: Dict[str, Tuple[str, str]] = {}
+# ISO 639-2/T terminology variants -> the bibliographic canonical key (fra -> fre).
+_ISO2_ALIASES: Dict[str, str] = {}
+for _line in _ISO639_DATA.splitlines():
+    _bib, _term, _one, _name = _line.split("|", 3)
+    _LANGUAGE_TABLE[_bib] = (_one, _name)
+    if _term:
+        _ISO2_ALIASES[_term] = _bib
+
+# Common alternate English names -> canonical key (the ISO name differs).
+_NAME_ALIASES: Dict[str, str] = {
+    "oriya": "ori", "farsi": "per", "dhivehi": "div", "maldivian": "div",
+    "flemish": "dut", "castilian": "spa", "mandarin": "cmn", "myanmar": "bur",
+    "panjabi": "pan", "pushto": "pus", "kyrgyz": "kir", "uyghur": "uig",
+    "sinhalese": "sin", "bangla": "ben",
 }
 
-# ISO 639-2/T terminology variants -> the bibliographic key used above.
-_ISO2_ALIASES: Dict[str, str] = {
-    "fra": "fre", "deu": "ger", "zho": "chi", "nld": "dut", "ces": "cze",
-    "ell": "gre", "fas": "per", "ron": "rum", "msa": "may", "slk": "slo",
-}
-
-# Curated native-script / misspelling tokens (merged into detection tokens).
+# Curated native-script / misspelling tokens (merged into detection tokens so
+# 'und' tracks named in the language's own script are still recognized).
 _EXTRA_NAME_TOKENS: Dict[str, Tuple[str, ...]] = {
     "tel": ("తెలుగు", "తెలుగ", "telegu"),
     "hin": ("हिंदी", "हिन्दी"),
     "tam": ("தமிழ்",),
     "mal": ("മലയാളം",),
     "kan": ("ಕನ್ನಡ",),
+    "ben": ("বাংলা", "bangla"),
+    "mar": ("मराठी",),
+    "guj": ("ગુજરાતી",),
+    "pan": ("ਪੰਜਾਬੀ", "panjabi"),
+    "urd": ("اردو",),
+    "kor": ("한국어", "한국어 (korean)"),
+    "jpn": ("日本語",),
+    "chi": ("中文", "普通话", "简体", "繁體"),
+    "fre": ("français", "francais"),
+    "ger": ("deutsch",),
+    "spa": ("español", "espanol", "latino"),
+    "por": ("português", "portugues", "brazilian"),
+    "rus": ("русский",),
+    "ara": ("العربية",),
+    "tha": ("ไทย",),
+    "vie": ("tiếng việt",),
+    "ita": ("italiano",),
+    "tur": ("türkçe", "turkce"),
+    "heb": ("עברית",),
+    "per": ("فارسی", "farsi"),
+    "ukr": ("українська",),
 }
 
 _DEFAULT_TARGETS: Tuple[str, ...] = ("hin", "eng", "tel")
 
 
 def resolve_language(token: str) -> Optional[str]:
-    """Resolve a user token (ISO 639-2/639-1/alias/English name) to the canonical
-    ISO 639-2 key, or None if unknown."""
+    """
+    Resolve a user token to the canonical ISO 639-2 key, or None if unknown.
+    Accepts every form: 2-letter (ko), 3-letter bibliographic (kor) and
+    terminological (fra), full English name (Korean), and common alternate
+    names (Farsi, Punjabi, Bangla, ...). Case-insensitive; BCP-47 tags like
+    'zh-Hans' resolve via their primary subtag.
+    """
     t = str(token).strip().lower()
+    if not t:
+        return None
     if t in _LANGUAGE_TABLE:
         return t
     if t in _ISO2_ALIASES:
         return _ISO2_ALIASES[t]
+    if t in _NAME_ALIASES:
+        return _NAME_ALIASES[t]
     for iso2, (iso1, name) in _LANGUAGE_TABLE.items():
         if t == iso1 or t == name.lower():
             return iso2
+    # BCP-47 / IETF tag: try the primary subtag ('zh-Hans' -> 'zh')
+    if "-" in t or "_" in t:
+        primary = re.split(r"[-_]", t)[0]
+        if primary != t:
+            return resolve_language(primary)
     return None
 
 
@@ -288,8 +508,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
     for token in targets_raw:
         iso2 = resolve_language(str(token))
         if iso2 is None:
-            supported = ", ".join(f"{k}/{v[1]}" for k, v in sorted(_LANGUAGE_TABLE.items()))
-            raise ConfigError(f"[languages] unknown language {token!r}. Supported: {supported}")
+            raise ConfigError(
+                f"[languages] unknown language {token!r}. Use any ISO 639-1 code ('ko'), "
+                f"ISO 639-2 code ('kor'), or English name ('Korean') — "
+                f"{len(_LANGUAGE_TABLE)} languages supported.")
         if iso2 not in targets:
             targets.append(iso2)
     lang_order = tuple(targets)
@@ -364,17 +586,16 @@ MOVIE_FILEBOT_FORMAT = r"""{n} ({y}){ imdbid ? " - ${imdbid}" : (tmdbid ? " - tm
   else if (c?.contains('avc') || c?.contains('h.264') || c?.contains('x264')) 'x264'
   else vc
 } - [{
-  audio.collect{ it.'Language/String' ?: it.Language ?: 'English' }
+  audio.collect{ it.'Language/String' ?: it.Language ?: 'und' }
        .collect{ l ->
-         l = l.toString().toLowerCase()
-         if (l == 'und' || l == 'unknown')                        return 'English'
-         if (l == 'en' || l == 'eng' || l.contains('english'))   return 'English'
-         if (l == 'hi' || l == 'hin' || l.contains('hindi'))     return 'Hindi'
-         if (l == 'te' || l == 'tel' || l.contains('telugu'))    return 'Telugu'
-         if (l == 'ta' || l == 'tam' || l.contains('tamil'))     return 'Tamil'
-         if (l == 'ml' || l == 'mal' || l.contains('malayalam')) return 'Malayalam'
-         if (l == 'kn' || l == 'kan' || l.contains('kannada'))   return 'Kannada'
-         return l.replaceAll(/\s*\(.+\)$/, '').capitalize()
+         def x = l.toString().replaceAll(/\s*\(.+\)$/, '').trim()
+         def c = x.toLowerCase()
+         if (c == '' || c == 'und' || c == 'unknown') return 'English'
+         if (x.length() > 3) return x.capitalize()
+         c = c.split(/[-_]/)[0]
+         def dn = ''
+         try { dn = new java.util.Locale(c).getDisplayLanguage(java.util.Locale.ENGLISH) } catch(e) {}
+         return (dn && dn.toLowerCase() != c) ? dn : x.capitalize()
        }
        .unique()
        .join(' + ')
@@ -392,14 +613,14 @@ TV_FILEBOT_FORMAT = r"""{n} ({y}) - S{s.pad(2)}E{e.pad(2)} - {t} - {vf}.{
   audio
     .collect { it.'Language/String' ?: it.Language ?: 'und' }
     .collect { l ->
-      def x = l.toString().trim().toLowerCase()
-      if (x == 'ta' || x == 'tam' || x.contains('tamil'))       return 'Tamil'
-      if (x == 'ml' || x == 'mal' || x.contains('malayalam'))   return 'Malayalam'
-      if (x == 'kn' || x == 'kan' || x.contains('kannada'))     return 'Kannada'
-      if (x == 'te' || x == 'tel' || x.contains('telugu'))      return 'Telugu'
-      if (x == 'hi' || x == 'hin' || x.contains('hindi'))       return 'Hindi'
-      if (x == 'en' || x == 'eng' || x.contains('english'))     return 'English'
-      return l.toString().replaceAll(/\s*\(.+\)$/, '')
+      def x = l.toString().replaceAll(/\s*\(.+\)$/, '').trim()
+      def c = x.toLowerCase()
+      if (c == '' || c == 'und' || c == 'unknown') return 'English'
+      if (x.length() > 3) return x.capitalize()
+      c = c.split(/[-_]/)[0]
+      def dn = ''
+      try { dn = new java.util.Locale(c).getDisplayLanguage(java.util.Locale.ENGLISH) } catch(e) {}
+      return (dn && dn.toLowerCase() != c) ? dn : x.capitalize()
     }
     .unique()
     .join(' + ')
@@ -1077,6 +1298,20 @@ def _get_prop(props: Dict[str, Any], key: str, default=None):
     return props.get(key, default)
 
 
+def _effective_track_language(props: Dict[str, Any]) -> str:
+    """Track language: legacy ISO 639-2 field first; if und/empty, the BCP-47
+    language_ietf primary subtag ('zh-Hans' -> 'zh'). Lowercased; 'und' fallback."""
+    lang = str(props.get("language", "") or "").lower().strip()
+    if lang and lang != "und":
+        return lang
+    ietf = str(props.get("language_ietf", "") or "").lower().strip()
+    if ietf and ietf != "und":
+        primary = re.split(r"[-_]", ietf)[0]
+        if primary:
+            return primary
+    return "und"
+
+
 def extract_tracks(mkv_path: Path, meta: Dict[str, Any]) -> List[Track]:
     tracks: List[Track] = []
     for t in meta.get("tracks", []):
@@ -1102,7 +1337,10 @@ def extract_tracks(mkv_path: Path, meta: Dict[str, Any]) -> List[Track]:
             type=str(t.get("type", "")),
             codec_id=str(t.get("codec_id", "")),
             codec=str(t.get("codec", "")),
-            language=str(_get_prop(props, "language", "und") or "und").lower(),
+            # Modern mkvmerge also writes a BCP-47 tag (language_ietf, e.g.
+            # 'zh-Hans'); when the legacy field is und/missing, fall back to
+            # the IETF tag's primary subtag so detection still works.
+            language=_effective_track_language(props),
             name=str(_get_prop(props, "track_name", "") or ""),
             default=bool(_get_prop(props, "default_track", False)),
             forced=bool(_get_prop(props, "forced_track", False)),

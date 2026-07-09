@@ -106,7 +106,7 @@ targets = ["hin", "eng", "tel"]     # the default — Hindi, English, Telugu
 ```
 
 - **List order = audio track order** in the output file (and the `[...]` filename bracket).
-- Accepts ISO 639-2 (`"spa"`), ISO 639-1 (`"es"`), or English names (`"Spanish"`); ~40 languages built in — an unknown value produces a config error listing all supported ones.
+- Accepts **every form**: ISO 639-1 (`"ko"`), ISO 639-2 bibliographic (`"kor"`) *and* terminological (`"fra"`), full English names (`"Korean"`), and common alternates (Farsi, Punjabi, Bangla…). The complete ISO 639 registry is built in (189 languages); BCP-47 track tags like `zh-Hans` are understood too.
 - Detection, display names, subtitle keeping, and cover art poster-language preference all follow the configured targets automatically.
 - **Video track language**: encoders usually leave it `und`; during tag cleaning the script sets it to the title's original language from TMDB (The Film → `eng`, RRR → `tel`). Override per run with `--force-video-lang`.
 
