@@ -59,6 +59,93 @@ _RICH_ENABLED: bool = False
 _CONSOLE: Optional["_RichConsole"] = None
 
 # =========================
+# Language table
+# =========================
+
+# Built-in language knowledge: ISO 639-2 (canonical key) -> (ISO 639-1, display name).
+# [languages] targets in MediaCleanup.toml are resolved against this table.
+_LANGUAGE_TABLE: Dict[str, Tuple[str, str]] = {
+    # Indian languages
+    "hin": ("hi", "Hindi"), "tel": ("te", "Telugu"), "tam": ("ta", "Tamil"),
+    "mal": ("ml", "Malayalam"), "kan": ("kn", "Kannada"), "ben": ("bn", "Bengali"),
+    "mar": ("mr", "Marathi"), "pan": ("pa", "Punjabi"), "guj": ("gu", "Gujarati"),
+    "urd": ("ur", "Urdu"), "ori": ("or", "Odia"), "nep": ("ne", "Nepali"),
+    "sin": ("si", "Sinhala"),
+    # European
+    "eng": ("en", "English"), "spa": ("es", "Spanish"), "fre": ("fr", "French"),
+    "ger": ("de", "German"), "ita": ("it", "Italian"), "por": ("pt", "Portuguese"),
+    "rus": ("ru", "Russian"), "dut": ("nl", "Dutch"), "pol": ("pl", "Polish"),
+    "swe": ("sv", "Swedish"), "nor": ("no", "Norwegian"), "dan": ("da", "Danish"),
+    "fin": ("fi", "Finnish"), "gre": ("el", "Greek"), "cze": ("cs", "Czech"),
+    "hun": ("hu", "Hungarian"), "rum": ("ro", "Romanian"), "ukr": ("uk", "Ukrainian"),
+    # Asian / Middle Eastern
+    "jpn": ("ja", "Japanese"), "kor": ("ko", "Korean"), "chi": ("zh", "Chinese"),
+    "ara": ("ar", "Arabic"), "tur": ("tr", "Turkish"), "tha": ("th", "Thai"),
+    "vie": ("vi", "Vietnamese"), "ind": ("id", "Indonesian"), "may": ("ms", "Malay"),
+    "heb": ("he", "Hebrew"), "per": ("fa", "Persian"), "fil": ("", "Filipino"),
+}
+
+# ISO 639-2/T terminology variants -> the bibliographic key used above.
+_ISO2_ALIASES: Dict[str, str] = {
+    "fra": "fre", "deu": "ger", "zho": "chi", "nld": "dut", "ces": "cze",
+    "ell": "gre", "fas": "per", "ron": "rum", "msa": "may", "slk": "slo",
+}
+
+# Curated native-script / misspelling tokens (merged into detection tokens).
+_EXTRA_NAME_TOKENS: Dict[str, Tuple[str, ...]] = {
+    "tel": ("తెలుగు", "తెలుగ", "telegu"),
+    "hin": ("हिंदी", "हिन्दी"),
+    "tam": ("தமிழ்",),
+    "mal": ("മലയാളം",),
+    "kan": ("ಕನ್ನಡ",),
+}
+
+_DEFAULT_TARGETS: Tuple[str, ...] = ("hin", "eng", "tel")
+
+
+def resolve_language(token: str) -> Optional[str]:
+    """Resolve a user token (ISO 639-2/639-1/alias/English name) to the canonical
+    ISO 639-2 key, or None if unknown."""
+    t = str(token).strip().lower()
+    if t in _LANGUAGE_TABLE:
+        return t
+    if t in _ISO2_ALIASES:
+        return _ISO2_ALIASES[t]
+    for iso2, (iso1, name) in _LANGUAGE_TABLE.items():
+        if t == iso1 or t == name.lower():
+            return iso2
+    return None
+
+
+def _build_language_maps(targets: Tuple[str, ...]) -> Tuple[Dict[str, str], Dict[str, Tuple[str, ...]], Dict[str, Tuple[str, ...]]]:
+    """Build (display_map, iso_codes, name_tokens) for the configured targets."""
+    display: Dict[str, str] = {}
+    iso_codes: Dict[str, Tuple[str, ...]] = {}
+    tokens: Dict[str, Tuple[str, ...]] = {}
+    for iso2 in targets:
+        iso1, name = _LANGUAGE_TABLE[iso2]
+        aliases = tuple(a for a, canon in _ISO2_ALIASES.items() if canon == iso2)
+        display[iso2] = name
+        iso_codes[iso2] = tuple(c for c in (iso2, iso1, *aliases) if c)
+        tokens[iso2] = (name.lower(), iso2) + _EXTRA_NAME_TOKENS.get(iso2, ())
+    return display, iso_codes, tokens
+
+
+def iso2_to_iso1(iso2: str) -> Optional[str]:
+    """ISO 639-2 -> 639-1 (e.g. 'hin' -> 'hi'); None when there is no 2-letter code."""
+    entry = _LANGUAGE_TABLE.get(_ISO2_ALIASES.get(iso2, iso2))
+    return entry[0] or None if entry else None
+
+
+def iso1_to_iso2(iso1: str) -> Optional[str]:
+    """ISO 639-1 -> 639-2 (e.g. 'en' -> 'eng')."""
+    for iso2, (one, _name) in _LANGUAGE_TABLE.items():
+        if one == iso1:
+            return iso2
+    return None
+
+
+# =========================
 # Configurable constants
 # =========================
 
@@ -100,30 +187,19 @@ class Config:
     # Similarity grouping for Movies (per-folder)
     SIMILARITY_THRESHOLD_DEFAULT: float = 0.88
 
-    # Language detection mapping (ISO + fuzzy tokens)
-    # Keys are canonical language labels used by output bracket list.
-    LANG_CANONICAL_ORDER: Tuple[str, ...] = ("Hin", "Eng", "Tel")
+    # Target languages — MediaCleanup.toml [languages] targets.
+    # Canonical keys are ISO 639-2 codes; ORDER = audio track order in output.
+    # Default (no [languages] section): Hindi, English, Telugu.
+    LANG_CANONICAL_ORDER: Tuple[str, ...] = _DEFAULT_TARGETS
     # Full display names used in the output filename bracket list and track naming.
-    # Use default_factory to avoid mutable-default dataclass errors (e.g., Python 3.13+).
-    LANG_DISPLAY_MAP: Dict[str, str] = dataclasses.field(default_factory=lambda: {
-        "Tel": "Telugu",
-        "Hin": "Hindi",
-        "Eng": "English",
-    })
-
+    LANG_DISPLAY_MAP: Dict[str, str] = dataclasses.field(
+        default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[0])
     # Canonical -> accepted ISO codes (lower)
-    LANG_ISO_CODES: Dict[str, Tuple[str, ...]] = dataclasses.field(default_factory=lambda: {
-        "Tel": ("tel", "te"),
-        "Hin": ("hin", "hi"),
-        "Eng": ("eng", "en"),
-    })
-
-    # Canonical -> fuzzy name tokens (lower; substring checks)
-    LANG_NAME_TOKENS: Dict[str, Tuple[str, ...]] = dataclasses.field(default_factory=lambda: {
-        "Tel": ("telugu", "tel", "తెలుగు", "తెలుగ", "telegu"),  # include common misspelling
-        "Hin": ("hindi", "hin", "हिंदी", "हिन्दी"),
-        "Eng": ("english", "eng"),
-    })
+    LANG_ISO_CODES: Dict[str, Tuple[str, ...]] = dataclasses.field(
+        default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[1])
+    # Canonical -> fuzzy name tokens (lower; substring checks against track names)
+    LANG_NAME_TOKENS: Dict[str, Tuple[str, ...]] = dataclasses.field(
+        default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[2])
 
     # Exclude audio if name indicates commentary/descriptive
     AUDIO_EXCLUDE_TOKENS: Tuple[str, ...] = ("commentary", "descriptive", "description", "director", "narration")
@@ -203,6 +279,22 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         raise ConfigError(f"[subtitles] languages must be a list of ISO codes, got: {sub_langs_raw!r}")
     sub_langs = tuple(str(x).strip().lower() for x in sub_langs_raw if str(x).strip()) or ("en",)
 
+    # [languages] targets — audio languages to keep, in output track order.
+    languages = data.get("languages", {}) or {}
+    targets_raw = languages.get("targets") or list(_DEFAULT_TARGETS)
+    if not isinstance(targets_raw, list) or not targets_raw:
+        raise ConfigError("[languages] targets must be a non-empty list, e.g. targets = [\"hin\", \"eng\", \"tel\"]")
+    targets: List[str] = []
+    for token in targets_raw:
+        iso2 = resolve_language(str(token))
+        if iso2 is None:
+            supported = ", ".join(f"{k}/{v[1]}" for k, v in sorted(_LANGUAGE_TABLE.items()))
+            raise ConfigError(f"[languages] unknown language {token!r}. Supported: {supported}")
+        if iso2 not in targets:
+            targets.append(iso2)
+    lang_order = tuple(targets)
+    lang_display, lang_iso_codes, lang_tokens = _build_language_maps(lang_order)
+
     def required(section: Dict[str, Any], section_name: str, key: str) -> str:
         v = section.get(key)
         if not v:
@@ -245,6 +337,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         OS_USERNAME=str(subtitles.get("username", "") or ""),
         OS_PASSWORD=str(subtitles.get("password", "") or ""),
         SUB_LANGS=sub_langs,
+        LANG_CANONICAL_ORDER=lang_order,
+        LANG_DISPLAY_MAP=lang_display,
+        LANG_ISO_CODES=lang_iso_codes,
+        LANG_NAME_TOKENS=lang_tokens,
     )
 
 
@@ -1044,16 +1140,14 @@ def apply_track_lang_overrides(
     Patch Track objects in-place so downstream detection uses the forced language.
     Also sets track.language to the ISO code so mkvmerge --language picks it up.
     """
-    _display = {"Hin": "Hindi", "Eng": "English", "Tel": "Telugu"}
     for t in tracks:
         overrides = audio_overrides if t.type == "audio" else (sub_overrides if t.type == "subtitles" else {})
         if t.id in overrides:
-            canon = overrides[t.id]
-            iso = _CANON_TO_ISO.get(canon, canon.lower())
-            logging.info("Force-lang override: track %d (%s) %r -> %s (%s)", t.id, t.type, t.language, canon, iso)
-            t.language = iso
+            canon = overrides[t.id]  # canonical == ISO 639-2 code
+            logging.info("Force-lang override: track %d (%s) %r -> %s", t.id, t.type, t.language, canon)
+            t.language = canon
             if not t.name or t.name.strip().lower() in ("", "und", "2 channels", "stereo", "5.1"):
-                t.name = _display.get(canon, canon)
+                t.name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
 
 
 def fix_track_langs_inplace(
@@ -1069,7 +1163,6 @@ def fix_track_langs_inplace(
     if not CFG.MKVPROPEDIT_EXE.exists():
         logging.warning("mkvpropedit not found — cannot fix language tags in-place.")
         return
-    _display = {"Hin": "Hindi", "Eng": "English", "Tel": "Telugu"}
     cmd = [str(CFG.MKVPROPEDIT_EXE), str(mkv_path)]
     audio_idx = 0
     sub_idx = 0
@@ -1078,18 +1171,16 @@ def fix_track_langs_inplace(
         if t.type == "audio":
             audio_idx += 1
             if t.id in audio_overrides:
-                canon = audio_overrides[t.id]
-                iso = _CANON_TO_ISO.get(canon, canon.lower())
-                name = _display.get(canon, canon)
-                cmd += ["--edit", f"track:a{audio_idx}", "--set", f"language={iso}", "--set", f"name={name}"]
+                canon = audio_overrides[t.id]  # canonical == ISO 639-2 code
+                name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
+                cmd += ["--edit", f"track:a{audio_idx}", "--set", f"language={canon}", "--set", f"name={name}"]
                 any_change = True
         elif t.type == "subtitles":
             sub_idx += 1
             if t.id in sub_overrides:
                 canon = sub_overrides[t.id]
-                iso = _CANON_TO_ISO.get(canon, canon.lower())
-                name = _display.get(canon, canon)
-                cmd += ["--edit", f"track:s{sub_idx}", "--set", f"language={iso}", "--set", f"name={name}"]
+                name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
+                cmd += ["--edit", f"track:s{sub_idx}", "--set", f"language={canon}", "--set", f"name={name}"]
                 any_change = True
     if any_change:
         r = run_cmd(cmd, timeout_sec=120)
@@ -1500,9 +1591,6 @@ def infer_codec_tag_from_filename(filename: str) -> Optional[str]:
         return "vp9"
     return None
 
-_CANON_TO_ISO: Dict[str, str] = {"Hin": "hin", "Eng": "eng", "Tel": "tel"}
-
-
 def parse_force_lang_overrides(pairs: Optional[List[List[str]]]) -> Dict[int, str]:
     """
     Parse repeated --force-audio-lang / --force-sub-lang TRACK_ID LANG pairs
@@ -1551,10 +1639,10 @@ def parse_audio_lang_filter(raw: List[str]) -> Optional[List[str]]:
         key = token.strip().lower()
         canon = lookup.get(key)
         if canon is None:
-            valid = sorted({k for k in lookup.values()})
+            accepted = ", ".join(f"{CFG.LANG_DISPLAY_MAP[c]}/{c}" for c in CFG.LANG_CANONICAL_ORDER)
             raise ValueError(
-                f"Unrecognised language '{token}'. "
-                f"Accepted values: {', '.join(v for v in [*CFG.LANG_DISPLAY_MAP.values(), *[c.lower() for c in CFG.LANG_CANONICAL_ORDER], 'tel','hin','eng'])}"
+                f"Unrecognised language '{token}'. Configured targets ([languages] in "
+                f"{CONFIG_FILE.name}): {accepted}"
             )
         if canon not in resolved:
             resolved.append(canon)
@@ -1947,6 +2035,7 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
         # Failures fall back to the basic (IMDB-only) tags — never fatal, and
         # dry runs stay offline.
         rich_xml_text: Optional[str] = None
+        rich: Optional[Dict[str, Any]] = None
         if not dry_run and _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY:
             try:
                 if is_tv:
@@ -2010,13 +2099,21 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
             if att_id is not None:
                 cmd += ["--delete-attachment", str(att_id)]
 
-        # 4. Set per-track names.
+        # 4. Set per-track names — and fix the video track language, which
+        #    encoders usually leave as 'und'. A --force-video-lang value wins;
+        #    otherwise the title's original language from TMDB is used.
+        video_lang: Optional[str] = _FORCE_VIDEO_LANG
+        if video_lang is None and rich and rich.get("orig_lang"):
+            video_lang = iso1_to_iso2(str(rich["orig_lang"]))
+
         video_idx = audio_idx = sub_idx = 0
         for t in tracks:
             if t.type == "video":
                 video_idx += 1
                 cmd += ["--edit", f"track:v{video_idx}",
                         "--set", f"name={segment_title}"]
+                if video_lang:
+                    cmd += ["--set", f"language={video_lang}"]
 
             elif t.type == "audio":
                 audio_idx += 1
@@ -2239,9 +2336,6 @@ _COVER_ATTACHMENT_NAMES = (
 _LOCAL_POSTER_NAMES = ("poster", "cover", "folder")
 _LOCAL_POSTER_EXTS = (".jpg", ".jpeg", ".png")
 
-# ISO 639-1 codes used by TMDB / fanart.tv image language fields.
-_CANON_TO_ISO1: Dict[str, str] = {"Hin": "hi", "Tel": "te", "Eng": "en"}
-
 # TMDB pre-sized poster (780x1170 for 2:3 posters) — no local image resize needed.
 _TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w780"
 
@@ -2384,7 +2478,7 @@ def poster_lang_preference(audio_canon_langs: List[str]) -> List[str]:
     """
     pref = ["en"]
     for canon in audio_canon_langs:
-        iso1 = _CANON_TO_ISO1.get(canon)
+        iso1 = iso2_to_iso1(canon)
         if iso1 and iso1 not in pref:
             pref.append(iso1)
     pref.append("null")
@@ -2629,6 +2723,10 @@ class CoverArtFetcher:
 # --no-fetch-tags sets this to False in main().
 _FETCH_TAGS_ENABLED: bool = True
 
+# --force-video-lang: canonical ISO 639-2 code to stamp on video tracks during
+# tag cleaning, overriding the TMDB original_language. Set in main().
+_FORCE_VIDEO_LANG: Optional[str] = None
+
 
 def _http_get_json_status(url: str, timeout: int = 30) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
     """Like _http_get_json but also returns the HTTP status (for key validation)."""
@@ -2841,6 +2939,7 @@ class MetadataFetcher:
                 "law_rating": law_rating,
                 "rating": rating,
                 "collection": ((data.get("belongs_to_collection") or {}).get("name") or None),
+                "orig_lang": data.get("original_language") or None,  # ISO 639-1
                 "tmdb_id": tmdb_id,
             }
 
@@ -2882,6 +2981,7 @@ class MetadataFetcher:
                 "network": networks[0].get("name") if networks else None,
                 "cast": self._top_cast(data.get("credits") or {}),
                 "law_rating": law_rating,
+                "orig_lang": data.get("original_language") or None,  # ISO 639-1
                 "tmdb_id": tv_id,
             }
 
@@ -3003,6 +3103,10 @@ def _save_review_copy(review_dir: Path, mkv_path: Path, image_bytes: bytes) -> O
     ext = ".png" if image_bytes[:4] == b"\x89PNG" else ".jpg"
     base = sanitize_filename(mkv_path.stem) or "cover"
     name = f"{base}{ext}"
+    try:
+        review_dir.mkdir(parents=True, exist_ok=True)  # lazy — pipeline runs create it on first use
+    except Exception:
+        return None
     target = review_dir / name
     if target.exists():
         # Same stem from another folder (rare): disambiguate with a short path hash.
@@ -3284,6 +3388,37 @@ def run_coverart_pipeline(
             logging.info("Open in a browser to verify posters: %s", report)
 
     return results
+
+
+# Shared cover art context for the MAIN pipeline: cover embedding runs as the
+# final finishing step of --movies/--tv (after the FileBot rename) unless
+# --skip-coverart is set. Initialized in main(); ledger keeps re-runs cheap.
+_PIPELINE_COVERART: Dict[str, Any] = {
+    "enabled": False, "fetcher": None, "ledger": None,
+    "review_dir": None, "results": [], "lock": threading.Lock(),
+}
+
+
+def pipeline_embed_cover(mkv: Optional[Path], is_tv: bool, dry_run: bool) -> None:
+    """Best-effort cover embed for a pipeline-finished file. Never fatal."""
+    ctx = _PIPELINE_COVERART
+    if not ctx["enabled"] or mkv is None:
+        return
+    if dry_run:
+        logging.info("[DRY] Would embed cover art: %s", mkv.name)
+        return
+    if not mkv.exists():
+        return
+    try:
+        res = process_coverart_one(mkv, is_tv, ctx["fetcher"], dry_run=False,
+                                   overwrite_cover=False,
+                                   review_dir=ctx["review_dir"], ledger=ctx["ledger"])
+        with ctx["lock"]:
+            ctx["results"].append(res)
+        if not res.ok:
+            logging.warning("Cover art failed (non-fatal): %s | %s", mkv.name, res.reason)
+    except Exception as e:
+        logging.warning("Cover art step failed (non-fatal): %s | %s", mkv.name, e)
 
 
 # =========================
@@ -3568,8 +3703,6 @@ _OS_API_BASE = "https://api.opensubtitles.com/api/v1"
 # OpenSubtitles requires a descriptive User-Agent identifying the app.
 _OS_USER_AGENT = "MediaCleanup v1.0"
 
-# ISO 639-1 <-> 639-2 for the sidecar suffix and embedded-track comparison.
-_ISO1_TO_ISO2 = {"en": "eng", "hi": "hin", "te": "tel", "ta": "tam", "ml": "mal", "kn": "kan"}
 
 
 def compute_oshash(path: Path) -> Optional[str]:
@@ -3604,7 +3737,7 @@ def subtitle_sidecar_path(mkv: Path, lang_iso1: str) -> Path:
     single = len(CFG.SUB_LANGS) == 1
     if single or lang_iso1 == "en":
         return mkv.with_suffix(".srt")
-    iso2 = _ISO1_TO_ISO2.get(lang_iso1, lang_iso1)
+    iso2 = iso1_to_iso2(lang_iso1) or lang_iso1
     return mkv.with_suffix(f".{iso2}.srt")
 
 
@@ -3953,7 +4086,7 @@ def choose_best_english_sub(metas: Dict[Path, Tuple[List[Track], int]], include_
             if t.type != "subtitles":
                 continue
             canon = detect_language_canonical(t)
-            if canon != "Eng":
+            if canon != "eng":
                 continue
             sc = score_sub(t, include_forced=include_forced)
             if t.forced:
@@ -4178,7 +4311,8 @@ def process_movie_group(
 
             # Rule 7: no target languages found — keep all tracks, just rename/tag
             if _actual_audio_count > 0 and _total_target_audio_count == 0:
-                logging.warning("movie: no target audio languages (Hindi/English/Telugu) found in %s — skipping remux, renaming only.", group[0].name)
+                logging.warning("movie: no target audio languages (%s) found in %s — skipping remux, renaming only.",
+                                "/".join(CFG.LANG_DISPLAY_MAP.values()), group[0].name)
                 src_file = group[0]
                 out_done = src_file
                 if not dry_run:
@@ -4201,6 +4335,7 @@ def process_movie_group(
                             logging.warning("Auto-cleantags (post-FileBot) failed (non-fatal): %s", ct.reason)
                 else:
                     logging.info("[DRY] Would rename/tag in-place (no target langs): %s", src_file.name)
+                pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_no_target_langs OK -> %s", out_done)
                 return Result(kind="movie_no_target_langs", source_items=group, output_path=out_done, ok=True,
                               details={"reason": "no_target_languages_found"})
@@ -4235,6 +4370,7 @@ def process_movie_group(
                             logging.warning("Auto-cleantags (post-FileBot) failed (non-fatal): %s", ct.reason)
                 else:
                     logging.info("[DRY] Would run FileBot + cleantags in-place on: %s", src_file.name)
+                pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_skip_remux OK -> %s", out_done)
                 return Result(kind="movie_skip_remux", source_items=group, output_path=out_done, ok=True,
                               details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks"})
@@ -4369,6 +4505,9 @@ def process_movie_group(
                 ct = clean_mkv_tags(out_done, dry_run=False)
                 if not ct.ok:
                     logging.warning("Auto-cleantags (post-FileBot) failed (non-fatal): %s", ct.reason)
+
+        # Step 4: cover art (final step — uses the canonical filename for lookup)
+        pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
 
         return Result(kind=kind, source_items=group, output_path=out_done, ok=True,
                       details={"cmd": r.cmd, "audio_langs": selected_audio_langs})
@@ -4554,7 +4693,8 @@ def process_tv_file(
 
         # Rule 7: file has no target languages at all — keep as-is, just rename/tag
         if _actual_audio_count > 0 and _total_target_audio_count == 0:
-            logging.warning("tv: no target audio languages (Hindi/English/Telugu) found in %s — skipping remux, renaming only.", src.name)
+            logging.warning("tv: no target audio languages (%s) found in %s — skipping remux, renaming only.",
+                            "/".join(CFG.LANG_DISPLAY_MAP.values()), src.name)
             out_done = src
             if not dry_run:
                 if work.exists() and work != src:
@@ -4574,6 +4714,7 @@ def process_tv_file(
                         logging.warning("Auto-cleantags (post-FileBot) failed (non-fatal): %s", ct.reason)
             else:
                 logging.info("[DRY] Would rename/tag in-place (no target langs): %s", src.name)
+            pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_no_target_langs OK -> %s", out_done)
             return Result(kind="tv_no_target_langs", source_items=[src], output_path=out_done, ok=True,
                           details={"reason": "no_target_languages_found"})
@@ -4608,6 +4749,7 @@ def process_tv_file(
             else:
                 logging.info("[DRY] Would run FileBot + cleantags in-place on: %s", src.name)
 
+            pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_skip_remux OK -> %s", out_done)
             return Result(kind="tv_skip_remux", source_items=[src], output_path=out_done, ok=True,
                           details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks"})
@@ -4630,13 +4772,12 @@ def process_tv_file(
             "track_names": {best_v.id: f"{show_name} - {season_str}{ep_str}" if season_str and ep_str else show_name},
         }))
 
-        # Audio — output order: Hindi → English → Telugu (LANG_CANONICAL_ORDER)
+        # Audio — output order follows the configured [languages] targets order.
         # All tracks per language are kept (e.g. stereo + 5.1 both included)
-        _lang_display = {"Tel": "Telugu", "Hin": "Hindi", "Eng": "English"}
         for canon in CFG.LANG_CANONICAL_ORDER:
             if canon not in audios:
                 continue
-            title = _lang_display[canon]
+            title = CFG.LANG_DISPLAY_MAP.get(canon, canon)
             for (afile, t) in audios[canon]:
                 parts.append((afile, {
                     "video_tracks": None,
@@ -4712,6 +4853,9 @@ def process_tv_file(
                 ct = clean_mkv_tags(out_done, dry_run=False, is_tv=True)
                 if not ct.ok:
                     logging.warning("Auto-cleantags (post-FileBot) failed (non-fatal): %s", ct.reason)
+
+        # Step 4: cover art (final step — uses the canonical filename for lookup)
+        pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
 
         return Result(kind=kind, source_items=[src], output_path=out_done, ok=True,
                       details={"cmd": r.cmd, "audio_langs": selected_audio_langs})
@@ -4853,6 +4997,13 @@ def main() -> int:
                          "NO_COLOR environment variable). Automatic when 'rich' is not installed.")
     ap.add_argument("--skip-cleantags", action="store_true",
                     help="Disable the automatic tag-clean step that normally runs after each remux.")
+    ap.add_argument("--skip-coverart", action="store_true",
+                    help="Disable the automatic cover art embed that runs as the final pipeline step. "
+                         "(The standalone --coverart mode is unaffected.)")
+    ap.add_argument("--force-video-lang", metavar="LANG", default=None,
+                    help="Set the VIDEO track language to this value during tag cleaning instead of "
+                         "the title's TMDB original language. Accepts any supported language "
+                         "(ISO code or name), e.g. --force-video-lang Hindi")
     ap.add_argument("--include-forced-subs", action="store_true", help="Allow forced English subtitle selection.")
     ap.add_argument(
         "--audio-langs", nargs="+", metavar="LANG", default=None,
@@ -4936,6 +5087,17 @@ def main() -> int:
         logging.info("Force audio lang overrides: %s", {k: CFG.LANG_DISPLAY_MAP.get(v, v) for k, v in force_audio_langs.items()})
     if force_sub_langs:
         logging.info("Force subtitle lang overrides: %s", {k: CFG.LANG_DISPLAY_MAP.get(v, v) for k, v in force_sub_langs.items()})
+
+    # --force-video-lang accepts ANY language in the built-in table (not just targets).
+    global _FORCE_VIDEO_LANG
+    if args.force_video_lang:
+        iso2 = resolve_language(args.force_video_lang)
+        if iso2 is None:
+            logging.error("--force-video-lang: unknown language %r. Use an ISO code or English name.",
+                          args.force_video_lang)
+            return 2
+        _FORCE_VIDEO_LANG = iso2
+        logging.info("Force video lang: %s (%s)", _LANGUAGE_TABLE[iso2][1], iso2)
 
     if args.self_check:
         return self_check()
@@ -5124,6 +5286,15 @@ def main() -> int:
     results: List[Result] = []
     started = time.time()
 
+    # Cover art rides along as the final finishing step of the pipeline
+    # (after FileBot rename) unless --skip-coverart. The ledger keeps
+    # re-runs cheap; failures never fail a file.
+    if not args.skip_coverart:
+        review_dir = (_SCRIPT_DIR / "logs" / "coverart_review" /
+                      _dt.datetime.now().strftime("%Y%m%d_%H%M%S")) if not args.dry_run else None
+        _PIPELINE_COVERART.update(enabled=True, fetcher=CoverArtFetcher(),
+                                  ledger=CoverartLedger(), review_dir=review_dir)
+
     # Movies: group per-folder then per similarity group
     movie_tasks: List[Tuple[List[Path], Path]] = []
     if do_movies:
@@ -5166,6 +5337,19 @@ def main() -> int:
                 logging.exception("Worker crashed: %s", e)
                 res = Result(kind="unknown", source_items=[], output_path=None, ok=False, reason=f"Worker exception: {e}")
             results.append(res)
+
+    # Finalize pipeline cover art: persist the ledger and write the review gallery.
+    if _PIPELINE_COVERART["enabled"] and not args.dry_run:
+        _PIPELINE_COVERART["ledger"].save()
+        ca_results = _PIPELINE_COVERART["results"]
+        embedded = sum(1 for r in ca_results if r.ok and r.details.get("review_image"))
+        if ca_results:
+            logging.info("Pipeline cover art: %d file(s) processed, %d new cover(s) embedded.",
+                         len(ca_results), embedded)
+        if _PIPELINE_COVERART["review_dir"] and embedded:
+            report = _write_coverart_report(_PIPELINE_COVERART["review_dir"], ca_results)
+            if report:
+                logging.info("Cover art review: %s", report)
 
     # Prune any leftover empty directories in WORK_ROOT (catches partial previous runs)
     if not args.dry_run and CFG.WORK_ROOT.exists():

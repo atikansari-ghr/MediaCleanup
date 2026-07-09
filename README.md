@@ -8,7 +8,7 @@
 
 Windows MKV media cleanup, merge, and tagging tool built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding.
 
-For **movies**: scans a folder, groups variant releases of the same movie (e.g. a Telugu release + a Hindi/English release), selects the best video track (HEVC preferred), collects **all Hindi/English/Telugu audio tracks** from every variant, keeps target-language subtitles, and merges everything into one clean MKV.
+For **movies**: scans a folder, groups variant releases of the same movie (e.g. a Telugu release + a Hindi/English release), selects the best video track (HEVC preferred), collects **all audio tracks in your target languages** from every variant (configurable — default Hindi/English/Telugu, ~40 languages supported), keeps target-language subtitles, and merges everything into one clean MKV. Every processed file is fully finished in one run: tags cleaned, metadata + cover art embedded, renamed via FileBot.
 
 For **TV**: applies the same track selection and tag cleaning to each episode file.
 

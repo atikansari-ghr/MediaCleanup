@@ -44,6 +44,14 @@ All four are **required**.
 
 The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run without editing the TOML.
 
+## `[languages]`
+
+| Key | Required | Description |
+|---|---|---|
+| `targets` | No (default `["hin", "eng", "tel"]`) | Audio languages to **keep** — all others are stripped during remux. **List order = audio track order** in output files. Accepts ISO 639-2 codes, ISO 639-1 codes, or English names; ~40 languages supported (unknown values raise a config error listing them all). |
+
+Everything language-related derives from this list: track detection (including native-script track names for Indian languages), the display names in the filename `[...]` bracket, which subtitles are kept, what `--audio-langs`/`--force-audio-lang` accept, and the poster-language preference for cover art (English always first, then your targets). The video track language is set separately from the title's TMDB original language (override: `--force-video-lang`).
+
 ## `[coverart]`
 
 API keys used by **both** `--coverart` (poster fetching) and rich metadata tagging (genre/director/actors/synopsis embedded during tag cleaning). All keys optional — an empty value disables that source. With no keys at all, `--coverart` still works using local poster files only, and tag cleaning writes basic tags.
@@ -74,7 +82,6 @@ Credentials for the `--subtitles` mode (OpenSubtitles.com REST API). All three c
 
 Behavioral constants are deliberately **not** in the TOML — they define what the tool *is*, and changing them means changing the spec:
 
-- Target languages (Hindi, English, Telugu) and their detection tokens
 - Video/audio/subtitle codec preference rankings
 - Resolution targets (2160p/1080p/720p)
 - Audio-exclusion tokens (commentary, descriptive, ...)

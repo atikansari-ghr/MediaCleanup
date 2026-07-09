@@ -55,7 +55,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 
 | Flag | Meaning |
 |---|---|
-| *(none)* | Normal pipeline: group, select tracks, remux, tag-clean, rename. |
+| *(none)* | Normal pipeline: group, select tracks, remux, tag-clean + metadata, FileBot rename, cover art. One run fully finishes each file. |
 | `--cleantags` | Standalone: clean promotional/watermark tags in-place on every MKV in scope. No remux. When API keys are configured, also embeds rich metadata — see [Metadata tags](#metadata-tags) below. |
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
@@ -72,10 +72,12 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | Flag | Meaning |
 |---|---|
 | `--overwrite` | Overwrite existing output files. Default: fail the item if output exists. |
-| `--audio-langs LANG...` | Keep only these languages. Accepted: `Telugu/tel/te`, `Hindi/hin/hi`, `English/eng/en` (case-insensitive). Default: all three when present. |
+| `--audio-langs LANG...` | Keep only a subset of your configured `[languages]` targets for this run (names or ISO codes, case-insensitive). Default: all targets when present. |
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
+| `--force-video-lang LANG` | Stamp the **video** track with this language instead of the title's TMDB original language. Accepts any supported language, not just targets. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
+| `--skip-coverart` | Disable the automatic cover art embed at the end of the pipeline. |
 | `--include-forced-subs` | Allow forced-flag subtitle selection. |
 | `--similarity-threshold F` | Movie-grouping filename similarity (0–1, default 0.88). Lower = group more aggressively. |
 
@@ -92,9 +94,23 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 
 ---
 
+## Target languages
+
+Which audio languages are kept (everything else is stripped during remux) is configured in `MediaCleanup.toml`:
+
+```toml
+[languages]
+targets = ["hin", "eng", "tel"]     # the default — Hindi, English, Telugu
+```
+
+- **List order = audio track order** in the output file (and the `[...]` filename bracket).
+- Accepts ISO 639-2 (`"spa"`), ISO 639-1 (`"es"`), or English names (`"Spanish"`); ~40 languages built in — an unknown value produces a config error listing all supported ones.
+- Detection, display names, subtitle keeping, and cover art poster-language preference all follow the configured targets automatically.
+- **Video track language**: encoders usually leave it `und`; during tag cleaning the script sets it to the title's original language from TMDB (The Film → `eng`, RRR → `tel`). Override per run with `--force-video-lang`.
+
 ## Cover art
 
-`--coverart` embeds a poster into each MKV as a `cover.jpg` attachment (the Matroska cover-art convention — shown by VLC, MPC-HC, Jellyfin, and Windows Explorer thumbnails). It edits attachments in-place; media streams are never touched.
+Cover art is embedded **automatically at the end of every pipeline run** (after the FileBot rename; disable with `--skip-coverart`). The standalone `--coverart` mode below is for backfills and redo work. Either way, a poster is embedded into each MKV as a `cover.jpg` attachment (the Matroska cover-art convention — shown by VLC, MPC-HC, Jellyfin, and Windows Explorer thumbnails). Attachments are edited in-place; media streams are never touched.
 
 **Skip/redo logic (ledger):** every embed is recorded in `logs\coverart_done.csv`. On later runs, recorded files are skipped **instantly** (no probing, no API calls), so whole-library re-runs cost seconds. Files with a cover the script embedded earlier but missing from the ledger (renamed file, rebuilt ledger) are recognized by the "Cover art" attachment marker and re-recorded without re-downloading. Covers that **came with the release** are treated as junk and **replaced** by default. `--coverart-overwrite` ignores the ledger and re-fetches/re-embeds everything in scope — combine with `--filter`/`--input` to redo specific titles. Stale ledger rows (files that no longer exist) are pruned automatically.
 
