@@ -294,6 +294,9 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
+**A download named `www.SomeSite.xyz - Movie.2024...` fails to identify**
+Release-site prefixes are stripped automatically before the database lookup. If a title still fails, the script also retries once letting FileBot parse the raw filename itself — check the log for `retrying without query`. If both attempts miss, the title may genuinely not be in TheMovieDB/TheTVDB yet; rename the file manually to `Title (Year).mkv` and re-run.
+
 **FileBot not renaming**
 FileBot is optional. If its bundled JRE is missing/corrupt, the script auto-disables it for the run and falls back to heuristic naming. Check `[filebot] exe` in the TOML.
 

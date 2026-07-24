@@ -41,7 +41,7 @@ output_root = 'D:\Media\Fixed'    # remuxed output (mirrors source structure)
 # The list ORDER = audio track order in the output file.
 # Accepts ISO 639-2 codes ("hin"), ISO 639-1 ("hi"), or English names ("Hindi").
 # Examples:  ["spa", "eng"]   ["Japanese", "English"]   ["hin", "tam", "eng"]
-targets = ["hin", "eng", "tel"]
+targets = ["hin", "eng", "tel", "kor"]
 
 [coverart]
 # API keys for the --coverart mode. All optional — an empty value disables that

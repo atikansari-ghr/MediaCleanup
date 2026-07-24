@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] — 2026-07-24
+
+### Fixed
+- **Release-site prefixes broke identification** — filenames like `www.example-site.net_-_The Film_2026_...` produced the lookup query `www example-site net - The Film (2026)`, which no database could match. Leading `www.*`, `domain.tld`, and `[www.site.com]` prefixes are now stripped from movie *and* TV name inference. Legitimate dotted titles (`Dotted.Title.One`, `Dotted.Title.Two`) are explicitly protected.
+- **FileBot query fallback** — when a lookup using our inferred title finds no match, FileBot is now retried once without `--query`, letting its own release-name parser identify the file (e.g. `ExampleSiteB.GroupName.Another Film.2014...` → `Another Film (2014) - tt1234567`).
+
 ## [1.3.0] — 2026-07-09
 
 ### Added

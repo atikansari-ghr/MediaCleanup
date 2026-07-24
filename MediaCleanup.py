@@ -1020,7 +1020,7 @@ def run_filebot_rename_final_mkv(
         before_size = None
 
     # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths.
-    cmd = [
+    base_cmd = [
         str(CFG.FILEBOT_EXE),
         "-rename", str(mkv),
         "--db", db,
@@ -1030,13 +1030,21 @@ def run_filebot_rename_final_mkv(
         "--conflict", "override",
         "-non-strict",
     ]
+    # Override FileBot's filename-based search with a clean title so release
+    # noise in the original filename doesn't corrupt the DB lookup result.
+    cmd = base_cmd + (["--q", query] if query else [])
     if query:
-        # Override FileBot's filename-based search with a clean title so release
-        # noise in the original filename doesn't corrupt the DB lookup result.
-        cmd += ["--q", query]
         logging.debug("FileBot query override: %s", query)
 
     r = run_cmd(cmd, timeout_sec=1200)
+
+    # Fallback: our inferred title can itself be wrong (odd release naming), and
+    # then the query is what blocks the match. Retry once letting FileBot parse
+    # the filename with its own release-name parser.
+    if not r.ok and query and mkv.exists():
+        logging.info("FileBot found no match for query %r — retrying without query: %s", query, mkv.name)
+        r = run_cmd(base_cmd, timeout_sec=1200)
+
     out_txt = (r.out or "").strip()
     err_txt = (r.err or "").strip()
 
@@ -1609,6 +1617,53 @@ def score_sub(track: Track, include_forced: bool) -> Tuple:
 # Filename inference helpers
 # =========================
 
+# Release-site / tracker prefixes glued onto release filenames, e.g.
+#   'www.example-site.net_-_The Film_2026_...'
+#   'www.example-site.party - Movie Name (2024) ...'
+#   '[www.another-site.com] - Some.Film.2019...'
+# Left in place they poison the DB lookup query, so they are stripped before
+# any title inference. The TLD list + the (?![.\w]) guard keep legitimate
+# dotted titles safe ('Dotted.Title.One' is never treated as a domain).
+_SITE_TLDS = (
+    "com|net|org|info|biz|co|io|me|tv|cc|ws|se|is|in|la|mx|sx|ph|to|ru|ua|eu|uk|us|ag|gd|gl|tw|"
+    "party|promo|link|life|xyz|club|space|site|online|store|fun|icu|pro|app|unblockit|wtf|cam|"
+    "lol|bar|cfd|mom|now|rest|sbs|vip|wiki|work|blue|red|green|digital|website|tel|cyou|lat|boo"
+)
+_DOMAIN_LABELS = r"[A-Za-z0-9][\w-]*(?:\.[A-Za-z0-9][\w-]*)*?"
+_SITE_PREFIX_RX = re.compile(
+    r"^\s*[\[\(]?\s*"
+    r"(?:"
+    # 'www.' is proof of a domain, so a dot may follow the TLD:
+    # 'www.ExampleSiteE.org.Another Film.2014...' -> 'Another Film.2014...'
+    r"www\." + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")\b"
+    # 'www.' with an unknown TLD, but clearly separated from the title by a dash
+    r"|www\.\S+(?=\s*[-–—])"
+    # bare domain: strict — the TLD must NOT be followed by more of a dotted
+    # title, so 'Dotted.Title.One' is never mistaken for a domain
+    r"|" + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")(?![.\w])"
+    r")"
+    r"\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
+    re.IGNORECASE,
+)
+
+
+def strip_site_prefix(stem: str) -> str:
+    """
+    Remove a leading release-site/domain prefix from a filename stem.
+    Underscores are normalized to spaces first (so the domain becomes a
+    space-delimited token) while dots stay intact for domain matching.
+    Returns the original stem when nothing is stripped or nothing would remain.
+    """
+    s = stem.replace("_", " ")
+    cleaned = _SITE_PREFIX_RX.sub("", s, count=1)
+    cleaned = re.sub(r"^[\s.\-–—]+", "", cleaned)
+    if not cleaned.strip():
+        return s
+    if cleaned != s:
+        logging.debug("Stripped site prefix: %r -> %r", stem, cleaned)
+    return cleaned
+
+
 def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
     """
     Best-effort inference of Movie Title + Year from a filename.
@@ -1620,7 +1675,7 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
 
     Note: Source tags like WEB-DL/HDRip/BluRay are NOT kept in the title; they are inferred separately.
     """
-    stem = p.stem
+    stem = strip_site_prefix(p.stem)
 
     # Normalize separators early
     s = stem.replace(".", " ").replace("_", " ")
@@ -3793,11 +3848,22 @@ def process_rename_one(
             "--conflict", "skip",
             "-non-strict",
         ]
+        base_cmd = list(cmd)
         if query:
             cmd += ["--q", query]
 
         r = run_cmd(cmd, timeout_sec=600)
         out_txt = (r.out or "").strip()
+
+        # Fallback: a wrong inferred title blocks the match, so retry once and
+        # let FileBot parse the filename with its own release-name parser.
+        # (In --action test, rc is 1 even on success — judge by the output.)
+        matched = ("[TEST]" in out_txt or "skipped" in out_txt.lower()) if dry_run else r.ok
+        if query and not matched and mkv.exists():
+            logging.info("FileBot found no match for query %r — retrying without query: %s",
+                         query, mkv.name)
+            r = run_cmd(base_cmd, timeout_sec=600)
+            out_txt = (r.out or "").strip()
 
         if dry_run:
             # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.
@@ -4739,7 +4805,7 @@ def infer_tv_components(p: Path) -> Tuple[str, Optional[str], Optional[str], Opt
     Tries hard to keep Plex/Jellyfin-friendly values:
       Show (Year) - SxxEyy - Title
     """
-    stem = p.stem.replace('.', ' ').replace('_', ' ')
+    stem = strip_site_prefix(p.stem).replace('.', ' ').replace('_', ' ')
     # Drop website/release-group junk in non-year parentheses, e.g.
     # '(SiteName Foo) Show Name S01 E02 ...' — keep '(YYYY)' groups.
     stem = re.sub(r"\((?!\s*(?:19|20)\d{2}\s*\))[^)]*\)", " ", stem)
