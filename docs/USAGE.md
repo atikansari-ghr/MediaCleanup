@@ -294,6 +294,9 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
+**A movie is renamed to the wrong year (e.g. a 2026 film matched to a 1984 remake)**
+Shouldn't happen any more: movie lookups are constrained to the year in the filename (±1 for release-date drift), so a same-title film from another year can never win. If the correct title genuinely can't be found under that year, the file is reported **FAILED** rather than renamed to a wrong guess — check the summary table.
+
 **A download named `www.SomeSite.xyz - Movie.2024...` fails to identify**
 Release-site prefixes are stripped automatically before the database lookup. If a title still fails, the script also retries once letting FileBot parse the raw filename itself — check the log for `retrying without query`. If both attempts miss, the title may genuinely not be in TheMovieDB/TheTVDB yet; rename the file manually to `Title (Year).mkv` and re-run.
 

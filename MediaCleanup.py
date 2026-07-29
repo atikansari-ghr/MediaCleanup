@@ -988,6 +988,30 @@ def run_filebot_rename_tv_mkv(mkv: Path, dry_run: bool) -> Path:
 
 
 
+def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = None) -> List[str]:
+    """
+    Build a FileBot --filter constraining the match to the film's year (±1 for
+    release-year drift). Movies only: for TV the query year is the series start
+    year, which must not constrain episode matching.
+
+    Without this, a failed title lookup can silently match a same-title film
+    from a different year (e.g. 'The Film 2026' -> 'The Film (1984)').
+    """
+    if db == "TheTVDB":
+        return []
+    y_str = year
+    if not y_str and query:
+        m_year = re.search(r"\((\d{4})\)", query)
+        y_str = m_year.group(1) if m_year else None
+    if not y_str:
+        return []
+    try:
+        y = int(y_str)
+    except ValueError:
+        return []
+    return ["--filter", f"y >= {y - 1} && y <= {y + 1}"]
+
+
 def run_filebot_rename_final_mkv(
     mkv: Path,
     *,
@@ -1030,9 +1054,13 @@ def run_filebot_rename_final_mkv(
         "--conflict", "override",
         "-non-strict",
     ]
+    # Year constraint (movies only): stops a same-title film from another year
+    # winning when the title match is imperfect. ±1 absorbs release-year drift.
+    year_filter = _filebot_year_filter(query, db)
+
     # Override FileBot's filename-based search with a clean title so release
     # noise in the original filename doesn't corrupt the DB lookup result.
-    cmd = base_cmd + (["--q", query] if query else [])
+    cmd = base_cmd + (["--q", query] if query else []) + year_filter
     if query:
         logging.debug("FileBot query override: %s", query)
 
@@ -1040,10 +1068,12 @@ def run_filebot_rename_final_mkv(
 
     # Fallback: our inferred title can itself be wrong (odd release naming), and
     # then the query is what blocks the match. Retry once letting FileBot parse
-    # the filename with its own release-name parser.
+    # the filename with its own release-name parser — but keep the year
+    # constraint, so a wrong-year film is never chosen silently.
     if not r.ok and query and mkv.exists():
-        logging.info("FileBot found no match for query %r — retrying without query: %s", query, mkv.name)
-        r = run_cmd(base_cmd, timeout_sec=1200)
+        logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                     query, " (year-constrained)" if year_filter else "", mkv.name)
+        r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
 
     out_txt = (r.out or "").strip()
     err_txt = (r.err or "").strip()
@@ -1647,6 +1677,40 @@ _SITE_PREFIX_RX = re.compile(
 )
 
 
+# Known release-site names, stripped even when the trailing part is not a
+# recognizable TLD ('SiteName.Foo.The Film.2026...' -> 'The Film.2026...').
+_SITE_NAME_LIST = (
+    "examplesite26", "examplesite22", "examplesite31", "examplesite29", "examplesite01", "examplesite03",
+    "examplesite18", "examplesite21", "examplesite12", "examplesite10", "examplesite11", "examplesite19",
+    "examplesite13", "examplesite38", "examplesite41", "examplesite25", "examplesite15", "examplesite14",
+    "examplesite27", "examplesite28", "examplesite09", "examplesite33", "examplesite24", "examplesite08",
+    "examplesite05", "examplesite30", "examplesite37", "examplesite36", "examplesite02", "examplesite20",
+    "examplesite04", "examplesite07", "examplesite06", "examplesite16", "examplesite23", "examplesite17",
+    "examplesite34", "examplesite35", "examplesite43", "examplesite42", "examplesite39", "examplesite32", "examplesite40", "examplesite45", "examplesite44",
+)
+# Longest first so 'examplesite15' wins over 'examplesite25' (alternation is first-match).
+_SITE_NAMES = "|".join(sorted(_SITE_NAME_LIST, key=len, reverse=True))
+
+# The label after a KNOWN site name may be an exotic TLD ('SiteName.Foo'), so a
+# wider list is allowed here than for bare-domain detection — but it must still
+# look like a TLD, or 'ExampleSiteA.The Film.Part.Two' would lose 'The Film'.
+_SITE_LABEL_TLDS = _SITE_TLDS + (
+    "|foo|dad|day|esq|fyi|ing|mov|new|phd|prof|rsvp|soy|zip|moi|run|ltd|art|top|men|win|"
+    "pw|su|nl|de|fr|es|jp|kr|br|ar|cl|pe|ec|za|ng|ke|pk|bd|lk|np|my|sg|th|vn|id|tr|ir|ae"
+)
+# With an optional TLD-looking trailing label (the '.Foo' in 'SiteName.Foo')
+_SITE_NAME_RX = re.compile(
+    r"^\s*[\[\(]?\s*(?:" + _SITE_NAMES + r")(?:\.(?:" + _SITE_LABEL_TLDS + r")\b)?"
+    r"\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
+    re.IGNORECASE,
+)
+# Site name only — used when the variant above ate the start of the real title
+_SITE_NAME_MIN_RX = re.compile(
+    r"^\s*[\[\(]?\s*(?:" + _SITE_NAMES + r")\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
+    re.IGNORECASE,
+)
+
+
 def strip_site_prefix(stem: str) -> str:
     """
     Remove a leading release-site/domain prefix from a filename stem.
@@ -1654,8 +1718,26 @@ def strip_site_prefix(stem: str) -> str:
     space-delimited token) while dots stay intact for domain matching.
     Returns the original stem when nothing is stripped or nothing would remain.
     """
+    def _starts_with_year(text: str) -> bool:
+        return bool(re.match(r"^(?:19|20)\d{2}\b", text.strip(" .-")))
+
     s = stem.replace("_", " ")
     cleaned = _SITE_PREFIX_RX.sub("", s, count=1)
+
+    # Site names can be chained ('ExampleSiteB.GroupName.Another Film.2014...').
+    for _ in range(3):
+        candidate = _SITE_NAME_RX.sub("", cleaned, count=1)
+        if candidate == cleaned:
+            break
+        # Guard against over-stripping: if the result now starts with the year,
+        # the trailing label was actually the film's title
+        # ('SiteName.Up.2009' must not become '2009').
+        if _starts_with_year(candidate):
+            candidate = _SITE_NAME_MIN_RX.sub("", cleaned, count=1)
+            if candidate == cleaned or _starts_with_year(candidate):
+                break
+        cleaned = candidate
+
     cleaned = re.sub(r"^[\s.\-–—]+", "", cleaned)
     if not cleaned.strip():
         return s
@@ -3848,20 +3930,25 @@ def process_rename_one(
             "--conflict", "skip",
             "-non-strict",
         ]
-        base_cmd = list(cmd)
+        # Year constraint (movies only) so a same-title film from another year
+        # can never win a fuzzy match.
+        year_filter = _filebot_year_filter(query, db, year=None if is_tv else year)
+        base_cmd = list(cmd) + year_filter
         if query:
             cmd += ["--q", query]
+        cmd += year_filter
 
         r = run_cmd(cmd, timeout_sec=600)
         out_txt = (r.out or "").strip()
 
         # Fallback: a wrong inferred title blocks the match, so retry once and
-        # let FileBot parse the filename with its own release-name parser.
+        # let FileBot parse the filename with its own release-name parser —
+        # still year-constrained, so a wrong-year match is never chosen.
         # (In --action test, rc is 1 even on success — judge by the output.)
         matched = ("[TEST]" in out_txt or "skipped" in out_txt.lower()) if dry_run else r.ok
         if query and not matched and mkv.exists():
-            logging.info("FileBot found no match for query %r — retrying without query: %s",
-                         query, mkv.name)
+            logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                         query, " (year-constrained)" if year_filter else "", mkv.name)
             r = run_cmd(base_cmd, timeout_sec=600)
             out_txt = (r.out or "").strip()
 

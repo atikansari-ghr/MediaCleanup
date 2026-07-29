@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.2] — 2026-07-29
+
+### Fixed
+- **Wrong-year matches** — `SiteName.Foo.The Film.2026...` was renamed to `The Film (1984)`. Movie lookups are now constrained to the filename year (±1 for release-date drift), so a same-title film from another year can never be matched. When nothing matches under the constraint the file is reported FAILED instead of silently renamed to a wrong guess. TV is never year-constrained.
+- **Release-site names without a valid TLD** — `SiteName.Foo`, `ExampleSiteA`, `ExampleSiteB.GroupName`, `ExampleSiteC.MX`, `ExampleSiteD.nl` and ~40 other known sites are now stripped from movie and TV name inference (longest-match-first, chained, with an over-strip guard so `SiteName.Up.2009` still yields `Up`).
+
 ## [1.3.1] — 2026-07-24
 
 ### Fixed
