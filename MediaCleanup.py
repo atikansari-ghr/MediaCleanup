@@ -1274,40 +1274,223 @@ def similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def group_movies_in_folder(folder_mkvs: List[Path], threshold: float) -> List[List[Path]]:
+# Persistent movie identity cache: path -> resolved IMDB/TMDB id. Lets repeat
+# runs group variant releases without paying for database lookups again.
+MOVIE_IDENTITY_CSV = _SCRIPT_DIR / "logs" / "movie_identity.csv"
+
+
+class IdentityCache:
+    """Thread-safe path -> (size, identity key) store, persisted as CSV."""
+
+    def __init__(self, csv_path: Path = MOVIE_IDENTITY_CSV) -> None:
+        self._csv_path = csv_path
+        self._lock = threading.Lock()
+        self._entries: Dict[str, Tuple[int, str]] = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self) -> None:
+        import csv
+        if not self._csv_path.exists():
+            return
+        try:
+            with self._csv_path.open("r", newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        self._entries[str(row["path"]).lower()] = (int(row["size"]), str(row["identity"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            logging.debug("Identity cache loaded: %d entries", len(self._entries))
+        except Exception as e:
+            logging.warning("Could not read identity cache (starting fresh): %s", e)
+
+    def get(self, mkv: Path) -> Optional[str]:
+        with self._lock:
+            entry = self._entries.get(str(mkv).lower())
+        if not entry:
+            return None
+        try:
+            return entry[1] if mkv.stat().st_size == entry[0] else None
+        except OSError:
+            return None
+
+    def add(self, mkv: Path, identity: str) -> None:
+        try:
+            size = mkv.stat().st_size
+        except OSError:
+            return
+        with self._lock:
+            self._entries[str(mkv).lower()] = (size, identity)
+            self._dirty = True
+
+    def save(self) -> None:
+        import csv
+        with self._lock:
+            if not self._dirty:
+                return
+            entries = dict(self._entries)
+        kept = {p: v for p, v in entries.items() if Path(p).exists()}
+        try:
+            self._csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._csv_path.open("w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["path", "size", "identity"])
+                for p, (size, ident) in sorted(kept.items()):
+                    w.writerow([p, size, ident])
+            logging.debug("Identity cache saved: %d entries", len(kept))
+        except Exception as e:
+            logging.warning("Could not save identity cache (non-fatal): %s", e)
+
+
+def resolve_movie_identity(mkv: Path, cache: Optional[IdentityCache],
+                           allow_lookup: bool) -> Optional[str]:
     """
-    SIMILARITY_RULE (implemented):
-    - Only group within the same directory.
-    - Normalize filenames by removing year + common quality/codec tokens.
-    - Use SequenceMatcher ratio; group if >= threshold.
-    - Log grouping with normalized names and ratio.
+    Resolve a stable identity key ('tt1234567' or 'tmdb:123456') for a movie.
+
+    Staged, cheapest first:
+      1. cache hit (size-verified)
+      2. IMDB id already in the filename, a parent folder, or the MKV's tags — free
+      3. TMDB lookup by inferred title+year — only when allow_lookup
+    Returns None when the film cannot be identified.
+    """
+    if cache is not None:
+        cached = cache.get(mkv)
+        if cached:
+            return cached
+
+    ident: Optional[str] = None
+    imdb = extract_imdb_id_from_movie_path(mkv)
+    if not imdb:
+        try:
+            imdb = extract_imdb_from_mkv_tags(mkv)
+        except Exception:
+            imdb = None
+    if imdb:
+        ident = imdb.lower()
+
+    if ident is None and allow_lookup and CFG.TMDB_API_KEY:
+        try:
+            title, year = infer_movie_name_year_from_path(mkv)
+            if title:
+                meta = _get_meta_fetcher().movie_metadata(title, year, None)
+                if meta and meta.get("tmdb_id"):
+                    ident = f"tmdb:{meta['tmdb_id']}"
+        except Exception as e:
+            logging.debug("Identity lookup failed for %s: %s", mkv.name, e)
+
+    if ident and cache is not None:
+        cache.add(mkv, ident)
+    return ident
+
+
+def _probe_duration_s(mkv: Path) -> Optional[float]:
+    try:
+        return _container_duration_s(mkvmerge_identify_json(mkv))
+    except Exception:
+        return None
+
+
+def split_group_by_duration(group: List[Path], tolerance: float = 0.01) -> List[List[Path]]:
+    """
+    Split a merge candidate into cohorts of compatible runtime.
+
+    Merging audio from releases of different length (alternate cut, extra
+    distributor logos, PAL speed-up) yields a file whose extra language is out
+    of sync for the whole movie — so only same-runtime files may be merged.
+    Files whose duration cannot be read are never merged blindly.
+    """
+    if len(group) < 2:
+        return [group]
+
+    cohorts: List[Tuple[Optional[float], List[Path]]] = []
+    for p in group:
+        d = _probe_duration_s(p)
+        placed = False
+        if d is not None:
+            for anchor, members in cohorts:
+                if anchor is not None and abs(d - anchor) <= max(2.0, anchor * tolerance):
+                    members.append(p)
+                    placed = True
+                    break
+        if not placed:
+            cohorts.append((d, [p]))
+
+    if len(cohorts) > 1:
+        logging.warning(
+            "Runtime mismatch — not merging %s (durations: %s). Same-runtime files are "
+            "still merged; the rest are processed separately.",
+            [p.name for p in group],
+            ", ".join(f"{(d if d is not None else float('nan')):.0f}s" for d, _ in cohorts))
+    return [members for _anchor, members in cohorts]
+
+
+def group_movies_in_folder(folder_mkvs: List[Path], threshold: float,
+                           identity_cache: Optional[IdentityCache] = None,
+                           allow_lookup: bool = False) -> List[List[Path]]:
+    """
+    Group variant releases of the same movie (same folder only), in stages:
+
+      1. Inferred title + year — fuzzy title match (>= threshold) with a year
+         guard, so a remake never merges with the original.
+      2/3. Identity — groups still separate are merged when they resolve to the
+         same IMDB/TMDB id (free signals first, database lookup only when
+         allow_lookup and the folder holds more than one candidate).
+      4. Runtime guard — a group is split into same-duration cohorts, because
+         merging different cuts would desync the added audio.
     """
     if not folder_mkvs:
         return []
 
     items = sorted(folder_mkvs, key=lambda p: p.name.lower())
-    norms = {p: normalize_for_similarity(p.name) for p in items}
+    info: Dict[Path, Tuple[str, Optional[str]]] = {p: infer_movie_name_year_from_path(p) for p in items}
 
+    # --- Stage 1: inferred title + year -------------------------------------
     groups: List[List[Path]] = []
     used: set[Path] = set()
-
     for p in items:
         if p in used:
             continue
         group = [p]
         used.add(p)
+        tp, yp = info[p]
         for q in items:
             if q in used:
                 continue
-            s = similarity(norms[p], norms[q])
-            if s >= threshold and norms[p] and norms[q]:
-                logging.info("Movie grouping: '%s' ~ '%s' | norm='%s' vs '%s' | ratio=%.3f",
-                             p.name, q.name, norms[p], norms[q], s)
+            tq, yq = info[q]
+            if not tp or not tq:
+                continue
+            if yp and yq and yp != yq:
+                continue  # same title, different year -> different film
+            s = similarity(tp.lower(), tq.lower())
+            if s >= threshold:
+                logging.info("Movie grouping: '%s' ~ '%s' | title='%s' (%s) vs '%s' (%s) | ratio=%.3f",
+                             p.name, q.name, tp, yp, tq, yq, s)
                 group.append(q)
                 used.add(q)
         groups.append(group)
 
-    return groups
+    # --- Stages 2/3: merge groups sharing a database identity ---------------
+    if identity_cache is not None and len(groups) > 1:
+        by_ident: Dict[str, List[Path]] = {}
+        merged: List[List[Path]] = []
+        for g in groups:
+            ident = next((i for i in (resolve_movie_identity(p, identity_cache, allow_lookup) for p in g) if i), None)
+            if ident is None:
+                merged.append(g)
+            elif ident in by_ident:
+                logging.info("Movie grouping by identity %s: merging %s into %s",
+                             ident, [p.name for p in g], [p.name for p in by_ident[ident]])
+                by_ident[ident].extend(g)  # same list object already in `merged`
+            else:
+                by_ident[ident] = g
+                merged.append(g)
+        groups = merged
+
+    # --- Stage 4: runtime guard ---------------------------------------------
+    final: List[List[Path]] = []
+    for g in groups:
+        final.extend(split_group_by_duration(g))
+    return final
 
 
 # =========================
@@ -5688,10 +5871,21 @@ def main() -> int:
         movies = apply_scan_filters(scan_mkvs(movies_root), movies_root, args.filter, "movies")
         logging.info("Movies scan: %d MKV(s) found in %s.", len(movies), movies_root)
         by_folder = group_movies_by_folder(movies)
+        # Identity resolution rescues variants whose filenames differ too much
+        # to match on title alone. Lookups are allowed in dry-run (read-only)
+        # so the preview matches what a real run would do; the cache is only
+        # written on real runs.
+        identity_cache = IdentityCache()
         for folder, mkvs in by_folder.items():
-            groups = group_movies_in_folder(mkvs, threshold=args.similarity_threshold)
+            groups = group_movies_in_folder(
+                mkvs, threshold=args.similarity_threshold,
+                identity_cache=identity_cache,
+                allow_lookup=len(mkvs) > 1,
+            )
             for g in groups:
                 movie_tasks.append((g, movies_root))
+        if not args.dry_run:
+            identity_cache.save()
 
     # TV: per-file
     tv_files: List[Path] = []

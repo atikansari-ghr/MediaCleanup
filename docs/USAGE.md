@@ -286,7 +286,11 @@ Check `mkvtoolnix_dir` in `MediaCleanup.toml` — `mkvmerge.exe` and `mkvpropedi
 Run `--verbose --dry-run` and look for `Skipping audio track` lines. If the track is `lang=und` with no recognizable name, use `--force-audio-lang`.
 
 **Files not grouped for merge**
-Lower `--similarity-threshold` to 0.80 or 0.75. `--verbose --dry-run` shows the normalized names and similarity ratios.
+Grouping compares the *inferred title + year*, not raw filenames, so junk like `DD5.1-224Kbps + Dual Audio UnCut` no longer blocks a match. If two releases still aren't merged, check the log:
+- `Runtime mismatch — not merging …` — the files have different durations (alternate cut, extra logos). Merging them would desync the added audio, so they are processed separately by design.
+- Different inferred years — a remake never merges with the original.
+- Different folders — grouping never crosses folder boundaries.
+Otherwise lower `--similarity-threshold` (0.80/0.75) to allow looser title matches; `--verbose --dry-run` shows every comparison.
 
 **Cover art not found for a title**
 Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages used). If the online sources miss it, drop a `poster.jpg` in the folder and re-run.
