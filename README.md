@@ -12,12 +12,13 @@ For **movies**: scans a folder, groups variant releases of the same movie (e.g. 
 
 For **TV**: applies the same track selection and tag cleaning to each episode file.
 
-Plus two standalone maintenance modes:
+Plus standalone maintenance modes:
 
-- `--cleantags` — strip promotional/watermark tags, attachments, and junk track names in-place, no remux.
-- `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art.
+- `--cleantags` — strip promotional/watermark tags, attachments, and junk track names in-place, no remux; embeds full metadata (genre, director, cast, synopsis, ratings) when API keys are configured.
+- `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art, with an HTML review gallery.
 - `--rename` — FileBot-rename messy downloads into a canonical format, with full undo.
 - `--subtitles` — download missing subtitles from OpenSubtitles as sidecar `.srt` files.
+- `--clear` — removal modifier: wipe all tags (`--cleantags --clear`) or remove embedded cover art (`--coverart --clear`).
 
 ## In action
 
@@ -104,14 +105,21 @@ python MediaCleanup.py
 python MediaCleanup.py --movies                          :: movies only
 python MediaCleanup.py --tv                              :: TV only
 python MediaCleanup.py --movies --input "D:\Downloads"   :: specific folder
-python MediaCleanup.py --audio-langs Telugu Hindi        :: keep only these languages
-python MediaCleanup.py --cleantags                       :: clean tags in-place, no remux
+python MediaCleanup.py --movies --filter "A*"            :: only titles starting with A
+python MediaCleanup.py --movies --inplace --backup       :: replace sources, keep .original.mkv
+python MediaCleanup.py --audio-langs Telugu Hindi        :: keep only these languages this run
+python MediaCleanup.py --cleantags                       :: clean tags + metadata, no remux
 python MediaCleanup.py --coverart                        :: embed cover art in-place
 python MediaCleanup.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
+python MediaCleanup.py --rename-undo                     :: revert the last rename batch
 python MediaCleanup.py --subtitles                       :: download missing sidecar subs
 python MediaCleanup.py --validate-keys                   :: test all configured API keys
 python MediaCleanup.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
+python MediaCleanup.py --cleantags --clear               :: strip all tags/title/track names
+python MediaCleanup.py --coverart --clear                :: remove embedded cover art
 ```
+
+Every mode supports `--dry-run` to preview and `--filter`/`--input` to scope the run.
 
 ## Output naming
 
