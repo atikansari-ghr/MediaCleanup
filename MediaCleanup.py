@@ -2573,6 +2573,74 @@ def _build_rich_tags_xml(meta: Dict[str, Any], is_tv: bool, imdb_id: Optional[st
     return "".join(parts)
 
 
+def clear_mkv_tags(mkv_path: Path, dry_run: bool) -> Result:
+    """
+    Strip a file bare: replace the global tags with an empty document and
+    delete the segment title and every track name. Nothing is written back —
+    not even the IMDB id — and no database is consulted (fully offline).
+    Embedded cover art is left alone; use --coverart --clear to remove that.
+    """
+    kind = "tag_clear"
+    try:
+        meta = mkvmerge_identify_json(mkv_path)
+        tracks = extract_tracks(mkv_path, meta)
+        attachments: List[Dict[str, Any]] = meta.get("attachments", []) or []
+
+        cmd: List[str] = [str(CFG.MKVPROPEDIT_EXE), str(mkv_path)]
+        tags_xml: Optional[Path] = None
+        if not dry_run:
+            tags_xml = _write_tags_xml(None)          # empty <Tags/> document
+            cmd += ["--tags", f"all:{tags_xml}"]
+        else:
+            cmd += ["--tags", "all:<empty.xml>"]
+
+        cmd += ["--edit", "info", "--delete", "title"]
+
+        # Junk attachments go; cover art is the other mode's business.
+        for att in attachments:
+            att_id = att.get("id")
+            if str(att.get("file_name", "")).lower() in _COVER_ATTACHMENT_NAMES:
+                continue
+            if att_id is not None:
+                cmd += ["--delete-attachment", str(att_id)]
+
+        video_idx = audio_idx = sub_idx = 0
+        for t in tracks:
+            if t.type == "video":
+                video_idx += 1
+                cmd += ["--edit", f"track:v{video_idx}", "--delete", "name"]
+            elif t.type == "audio":
+                audio_idx += 1
+                cmd += ["--edit", f"track:a{audio_idx}", "--delete", "name"]
+            elif t.type == "subtitles":
+                sub_idx += 1
+                cmd += ["--edit", f"track:s{sub_idx}", "--delete", "name"]
+
+        if dry_run:
+            logging.info("[DRY] Would clear ALL tags, title and track names: %s", mkv_path.name)
+            return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                          ok=True, reason="dry-run")
+
+        try:
+            r = run_cmd(cmd, timeout_sec=300)
+        finally:
+            if tags_xml and tags_xml.exists():
+                try:
+                    tags_xml.unlink()
+                except Exception:
+                    pass
+
+        if not r.ok and r.rc > 1:
+            return Result(kind=kind, source_items=[mkv_path], output_path=None, ok=False,
+                          reason=f"mkvpropedit rc={r.rc}: {(r.out or r.err).strip()}")
+        logging.info("Tags cleared: %s", mkv_path.name)
+        return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path, ok=True)
+
+    except Exception as e:
+        logging.exception("Tag clear failed: %s", mkv_path.name)
+        return Result(kind=kind, source_items=[mkv_path], output_path=None, ok=False, reason=str(e))
+
+
 def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result:
     """
     Clean promotional/watermark tags from an MKV in-place using mkvpropedit.
@@ -2809,6 +2877,7 @@ def _cleantags_one(
     is_tv: bool,
     dry_run: bool,
     skip_filebot: bool = False,
+    clear_all: bool = False,
 ) -> Result:
     """
     Full cleantags sequence for a single file:
@@ -2818,6 +2887,10 @@ def _cleantags_one(
       3. clean_mkv_tags        — update segment title to match the final filename
     """
     kind = "tag_clean"
+
+    # --clear: strip everything and stop — no metadata, no FileBot rename.
+    if clear_all:
+        return clear_mkv_tags(mkv_path, dry_run=dry_run)
 
     # Step 1: clean tags — also resolves the clean title / IMDB we'll need below
     ct = clean_mkv_tags(mkv_path, dry_run=dry_run, is_tv=is_tv)
@@ -2877,8 +2950,10 @@ def run_cleantags_pipeline(
     tv_root: Optional[Path] = None,
     skip_filebot: bool = False,
     filters: Optional[List[str]] = None,
+    clear_all: bool = False,
 ) -> List[Result]:
-    """Scan Movies/TV roots, clean tags, and rename via FileBot on every MKV found."""
+    """Scan Movies/TV roots, clean tags, and rename via FileBot on every MKV found
+    (or, with clear_all, strip every tag and leave the file bare)."""
     movies_root = movies_root or CFG.MOVIES_ROOT
     tv_root     = tv_root     or CFG.TV_ROOT
     targets: List[Path] = []
@@ -2904,7 +2979,7 @@ def run_cleantags_pipeline(
     results: List[Result] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
-            ex.submit(_cleantags_one, p, is_tv, dry_run, skip_filebot): p
+            ex.submit(_cleantags_one, p, is_tv, dry_run, skip_filebot, clear_all): p
             for p, is_tv in tagged_targets
         }
         for fut in concurrent.futures.as_completed(futs):
@@ -3011,6 +3086,11 @@ class CoverartLedger:
         with self._lock:
             self._entries[str(mkv).lower()] = (
                 size, _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), source)
+
+    def remove(self, mkv: Path) -> None:
+        """Forget a file so a later --coverart run fetches it again."""
+        with self._lock:
+            self._entries.pop(str(mkv).lower(), None)
 
     def save(self) -> None:
         """Rewrite the CSV, pruning rows whose files no longer exist."""
@@ -3280,14 +3360,23 @@ class CoverArtFetcher:
         source = "none"
         tmdb_tv_id: Optional[int] = None
 
-        # Strip a trailing (Year) for the title search; TMDB matches better without it.
+        # Strip a trailing (Year) for the title search, but KEEP the year as a
+        # constraint: a bare 'Show Name' search ranks by popularity and returns
+        # 'The Old Show Name' (1998) instead of the 2026 series.
         search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
+        ym = re.search(r"\((\d{4})\)", show_name or "")
+        show_year = ym.group(1) if ym else None
 
         if CFG.TMDB_API_KEY:
             if imdb_id:
                 _mv, tmdb_tv_id = self._tmdb_find_by_imdb(imdb_id)
             if tmdb_tv_id is None and search_name:
-                tmdb_tv_id = self._tmdb_search(search_name, None, is_tv=True)
+                if show_year:
+                    # Year known: only accept a series from that year — a wrong
+                    # show's poster is worse than no poster.
+                    tmdb_tv_id = resolve_tv_series_tmdb_id(search_name, show_year)
+                else:
+                    tmdb_tv_id = self._tmdb_search(search_name, None, is_tv=True)
             if tmdb_tv_id is not None:
                 purl = self._tmdb_pick_poster_url(tmdb_tv_id, is_tv=True, lang_pref=lang_pref)
                 if purl:
@@ -3550,12 +3639,26 @@ class MetadataFetcher:
         cache_key = f"show:{(imdb_id or show_name or '').lower()}"
 
         def fetch() -> Optional[Dict[str, Any]]:
+            # Keep the year as a constraint: a bare 'Show Name' search ranks by
+            # popularity and returns 'The Old Show Name' (1998), whose tags
+            # would then be embedded into a 2026 Bengali series.
             search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
+            ym = re.search(r"\((\d{4})\)", show_name or "")
+            show_year = ym.group(1) if ym else None
+
             tv_id: Optional[int] = None
             if imdb_id:
                 _mv, tv_id = self._tmdb_ids_for_imdb(imdb_id)
             if tv_id is None and search_name:
-                tv_id = self._tmdb_search_id(search_name, None, is_tv=True)
+                if show_year:
+                    # Year known: accept only a series from that year — wrong
+                    # metadata is worse than none.
+                    tv_id = resolve_tv_series_tmdb_id(search_name, show_year)
+                    if tv_id is None:
+                        logging.info("No TMDB series %r (%s) — skipping metadata rather than "
+                                     "tagging with a different show.", search_name, show_year)
+                else:
+                    tv_id = self._tmdb_search_id(search_name, None, is_tv=True)
             if tv_id is None:
                 return None
 
@@ -3728,6 +3831,7 @@ def process_coverart_one(
     overwrite_cover: bool,
     review_dir: Optional[Path] = None,
     ledger: Optional[CoverartLedger] = None,
+    clear_only: bool = False,
 ) -> Result:
     """
     Full cover-art sequence for one MKV:
@@ -3742,6 +3846,31 @@ def process_coverart_one(
     """
     kind = "coverart"
     try:
+        if clear_only:
+            meta = mkvmerge_identify_json(mkv_path)
+            existing, _ours = mkv_cover_attachments(meta)
+            if not existing:
+                if ledger is not None and not dry_run:
+                    ledger.remove(mkv_path)
+                return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                              ok=True, reason="no_cover")
+            if dry_run:
+                logging.info("[DRY] Would remove embedded cover art: %s", mkv_path.name)
+                return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                              ok=True, reason="dry-run")
+            cmd = [str(CFG.MKVPROPEDIT_EXE), str(mkv_path)]
+            for aid in existing:
+                cmd += ["--delete-attachment", str(aid)]
+            r = run_cmd(cmd, timeout_sec=300)
+            if not r.ok and r.rc > 1:
+                return Result(kind=kind, source_items=[mkv_path], output_path=None, ok=False,
+                              reason=f"cover removal failed: {(r.out or r.err).strip()}")
+            if ledger is not None:
+                ledger.remove(mkv_path)  # so a later run fetches it again
+            logging.info("Cover art removed: %s", mkv_path.name)
+            return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                          ok=True, details={"source": "cleared"})
+
         if not overwrite_cover and ledger is not None and ledger.has(mkv_path):
             logging.debug("Ledger: cover already done, skipping: %s", mkv_path.name)
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
@@ -3918,12 +4047,14 @@ def run_coverart_pipeline(
     tv_root: Optional[Path] = None,
     overwrite_cover: bool = False,
     filters: Optional[List[str]] = None,
+    clear_only: bool = False,
 ) -> List[Result]:
-    """Scan Movies/TV roots and embed cover art into every MKV missing one."""
+    """Scan Movies/TV roots and embed cover art into every MKV missing one
+    (or, with clear_only, remove embedded cover art)."""
     movies_root = movies_root or CFG.MOVIES_ROOT
     tv_root = tv_root or CFG.TV_ROOT
 
-    if not (CFG.TMDB_API_KEY or CFG.FANARTTV_API_KEY or CFG.OMDB_API_KEY):
+    if not clear_only and not (CFG.TMDB_API_KEY or CFG.FANARTTV_API_KEY or CFG.OMDB_API_KEY):
         logging.warning("coverart: no API keys in [coverart] section of %s — "
                         "only local poster files (poster.jpg/cover.jpg/folder.jpg) will be used.",
                         CONFIG_FILE.name)
@@ -3951,7 +4082,7 @@ def run_coverart_pipeline(
     # report, so wrong matches can be spotted at a glance. Dry runs are offline
     # (no images to show), so no review folder is created.
     review_dir: Optional[Path] = None
-    if not dry_run and tagged_targets:
+    if not dry_run and tagged_targets and not clear_only:
         review_dir = _SCRIPT_DIR / "logs" / "coverart_review" / _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         try:
             review_dir.mkdir(parents=True, exist_ok=True)
@@ -3965,7 +4096,7 @@ def run_coverart_pipeline(
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
             ex.submit(process_coverart_one, p, is_tv, fetcher, dry_run,
-                      overwrite_cover, review_dir, ledger): p
+                      overwrite_cover, review_dir, ledger, clear_only): p
             for p, is_tv in tagged_targets
         }
         for fut in concurrent.futures.as_completed(futs):
@@ -5619,6 +5750,11 @@ def main() -> int:
                          "[coverart] section of MediaCleanup.toml). Uses --movies/--tv/--input scope flags.")
     ap.add_argument("--coverart-overwrite", action="store_true",
                     help="With --coverart: replace existing embedded cover art instead of skipping the file.")
+    ap.add_argument("--clear", action="store_true",
+                    help="Removal modifier for the standalone modes. With --cleantags: wipe ALL tags, "
+                         "the segment title and every track name, writing nothing back (offline, no "
+                         "database lookups). With --coverart: delete embedded cover art and forget the "
+                         "file in the ledger so a later run re-fetches it.")
     ap.add_argument("--rename", action="store_true",
                     help="Standalone mode: rename MKVs into the canonical naming format via FileBot "
                          "(no remux, no tag changes unless --force-*-lang is given). Requires exactly "
@@ -5776,6 +5912,10 @@ def main() -> int:
         logging.error("Invalid arguments: %s are separate modes; run them one at a time.", " and ".join(modes))
         return 2
 
+    if args.clear and not (args.cleantags or args.coverart):
+        logging.error("--clear applies to --cleantags or --coverart.")
+        return 2
+
     if args.backup and not args.inplace:
         logging.error("--backup only makes sense together with --inplace.")
         return 2
@@ -5842,10 +5982,12 @@ def main() -> int:
             tv_root=tv_root,
             skip_filebot=False,  # always attempt FileBot rename in --cleantags mode
             filters=args.filter,
+            clear_all=args.clear,
         )
         ok_ct  = sum(1 for r in ct_results if r.ok)
         bad_ct = sum(1 for r in ct_results if not r.ok)
-        logging.info("cleantags summary: total=%d OK=%d failed=%d", len(ct_results), ok_ct, bad_ct)
+        logging.info("%s summary: total=%d OK=%d failed=%d",
+                     "cleartags" if args.clear else "cleantags", len(ct_results), ok_ct, bad_ct)
         if bad_ct:
             for r in ct_results:
                 if not r.ok:
@@ -5920,13 +6062,19 @@ def main() -> int:
             tv_root=tv_root,
             overwrite_cover=args.coverart_overwrite,
             filters=args.filter,
+            clear_only=args.clear,
         )
         ok_ca = sum(1 for r in ca_results if r.ok)
         bad_ca = sum(1 for r in ca_results if not r.ok)
-        skipped_ca = sum(1 for r in ca_results
-                         if r.ok and r.reason in ("already_has_cover", "ledger_skip"))
-        logging.info("coverart summary: total=%d OK=%d (already done: %d) failed=%d",
-                     len(ca_results), ok_ca, skipped_ca, bad_ca)
+        if args.clear:
+            cleared = sum(1 for r in ca_results if r.ok and r.details.get("source") == "cleared")
+            logging.info("coverart clear summary: total=%d cleared=%d (had none: %d) failed=%d",
+                         len(ca_results), cleared, ok_ca - cleared, bad_ca)
+        else:
+            skipped_ca = sum(1 for r in ca_results
+                             if r.ok and r.reason in ("already_has_cover", "ledger_skip"))
+            logging.info("coverart summary: total=%d OK=%d (already done: %d) failed=%d",
+                         len(ca_results), ok_ca, skipped_ca, bad_ca)
         if bad_ca:
             for r in ca_results:
                 if not r.ok:

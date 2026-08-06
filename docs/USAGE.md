@@ -59,6 +59,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--cleantags` | Standalone: clean promotional/watermark tags in-place on every MKV in scope. No remux. When API keys are configured, also embeds rich metadata — see [Metadata tags](#metadata-tags) below. |
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
+| `--clear` | Removal modifier. With `--cleantags`: wipe **all** tags, the segment title and every track name, writing nothing back (offline). With `--coverart`: delete embedded cover art and forget the file in the ledger so a later run re-fetches it. |
 | `--rename` | Standalone: FileBot-rename every MKV in scope into the canonical format. Requires exactly one of `--movies`/`--tv`. See [Renaming downloads](#renaming-downloads). |
 | `--rename-into` | With `--rename`: move files into the library structure under the configured roots. |
 | `--rename-undo` | Revert the most recent `--rename` batch, then exit. |
@@ -297,6 +298,21 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
+
+**Wrong metadata or poster embedded (from a different show)**
+TV series lookups are year-constrained: `Show Name (2026)` no longer resolves to *The Old Show Name* (1998), which TMDB ranks first for a bare `Show Name` search. When no series matches the year, the script now embeds **nothing** rather than another show's data. To repair files tagged before this fix:
+
+```bat
+python MediaCleanup.py --cleantags --tv --filter "Show Name*"                        :: re-tag correctly
+python MediaCleanup.py --coverart --tv --filter "Show Name*" --coverart-overwrite    :: re-fetch the poster
+```
+
+To strip a file bare instead, use `--clear`:
+
+```bat
+python MediaCleanup.py --cleantags --clear --tv --filter "Show Name*"   :: remove all tags/title/track names
+python MediaCleanup.py --coverart  --clear --tv --filter "Show Name*"   :: remove the embedded cover
+```
 
 **A TV episode is renamed to a different show with the same name**
 Shouldn't happen any more. TV lookups are constrained to the series year from the folder/filename, and if TheTVDB has no matching series the script resolves it on TMDB and pins FileBot to that exact series id. This matters for regional shows: the Bengali *Show Name* (2026) has no TheTVDB entry at all, so FileBot used to silently substitute the English *Show Name* (2024). Make sure the show folder or filename carries the right year — that year is the constraint.

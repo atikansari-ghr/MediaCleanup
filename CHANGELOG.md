@@ -3,6 +3,14 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] — 2026-08-06
+
+### Fixed
+- **Wrong show's metadata and poster embedded into TV episodes** — the tag and cover art paths searched TMDB by show name with the year deliberately dropped, so `Show Name (2026)` resolved to **The Old Show Name (1998)** (TMDB's most popular `Show Name` match) and embedded its genre, network, cast, episode titles and poster. Both paths are now year-constrained via `resolve_tv_series_tmdb_id()`; when no series matches the year, nothing is written rather than another show's data.
+
+### Added
+- **`--clear`** — removal modifier for the standalone modes. `--cleantags --clear` wipes all tags, the segment title and every track name, writing nothing back (fully offline, no database lookups, no rename). `--coverart --clear` deletes embedded cover art and removes the file's ledger row so a later run re-fetches it. Both honor `--dry-run`, `--filter` and `--input`.
+
 ## [1.4.1] — 2026-08-06
 
 ### Fixed
