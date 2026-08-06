@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-08-06
+
+### Fixed
+- **TV episodes matched to the wrong same-named show** — `Show Name (2026) - S01E01 - An Episode Title` was renamed to `Show Name (2024) (2024) - S01E01 - Another Show Name`. There are four series called *Show Name*; the Bengali 2026 one has no TheTVDB entry at all (`tvdb=None`), so FileBot's fuzzy search silently substituted a different one. TV lookups are now year-constrained, and when TheTVDB has no matching series the show is resolved on TMDB and FileBot is pinned to that exact series id.
+- **Doubled year in TV names** (`Show Name (2024) (2024)`) — TheTVDB disambiguates same-named series by embedding the year in the series name; the format now strips a trailing `(YYYY)` from the show name before appending the year. Applies to episode filenames and `--rename-into` folders.
+
 ## [1.4.0] — 2026-08-05
 
 ### Fixed

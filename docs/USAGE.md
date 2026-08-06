@@ -298,6 +298,9 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
+**A TV episode is renamed to a different show with the same name**
+Shouldn't happen any more. TV lookups are constrained to the series year from the folder/filename, and if TheTVDB has no matching series the script resolves it on TMDB and pins FileBot to that exact series id. This matters for regional shows: the Bengali *Show Name* (2026) has no TheTVDB entry at all, so FileBot used to silently substitute the English *Show Name* (2024). Make sure the show folder or filename carries the right year — that year is the constraint.
+
 **A movie is renamed to the wrong year (e.g. a 2026 film matched to a 1984 remake)**
 Shouldn't happen any more: movie lookups are constrained to the year in the filename (±1 for release-date drift), so a same-title film from another year can never win. If the correct title genuinely can't be found under that year, the file is reported **FAILED** rather than renamed to a wrong guess — check the summary table.
 

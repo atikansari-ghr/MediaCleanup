@@ -604,7 +604,9 @@ MOVIE_FILEBOT_FORMAT = r"""{n} ({y}){ imdbid ? " - ${imdbid}" : (tmdbid ? " - tm
 # Final TV episode naming
 # Example output:
 #   Show Name (Year) - S01E03 - Episode Title - 1080p.x265 - [Telugu + Hindi + English].mkv
-TV_FILEBOT_FORMAT = r"""{n} ({y}) - S{s.pad(2)}E{e.pad(2)} - {t} - {vf}.{
+# {n} may already carry a disambiguating year on TheTVDB ('Show Name (2024)'),
+# which would render as 'Show Name (2024) (2024)' — strip it before adding {y}.
+TV_FILEBOT_FORMAT = r"""{n.replaceAll(/\s*\(\d{4}\)$/, '')} ({y}) - S{s.pad(2)}E{e.pad(2)} - {t} - {vf}.{
   def c = vc?.toString()?.toLowerCase()
   if (c?.contains('hevc') || c?.contains('h.265') || c?.contains('x265')) 'x265'
   else if (c?.contains('avc') || c?.contains('h.264') || c?.contains('x264')) 'x264'
@@ -988,17 +990,68 @@ def run_filebot_rename_tv_mkv(mkv: Path, dry_run: bool) -> Path:
 
 
 
+# TMDB series id per (show, year), resolved once per run.
+_TV_SERIES_ID_CACHE: Dict[str, Optional[int]] = {}
+_TV_SERIES_ID_LOCK = threading.Lock()
+
+
+def resolve_tv_series_tmdb_id(show: str, year: Optional[str]) -> Optional[int]:
+    """
+    Resolve a TV series to its TMDB id by name + first-air year.
+
+    Used when TheTVDB cannot identify a show at all — regional series are often
+    on TMDB only (e.g. the Bengali 'Show Name' (2026) has no TheTVDB entry), and
+    FileBot's fuzzy search would otherwise substitute a same-named show.
+    """
+    if not CFG.TMDB_API_KEY or not show or not year:
+        return None
+    key = f"{show.strip().lower()}|{year}"
+    with _TV_SERIES_ID_LOCK:
+        if key in _TV_SERIES_ID_CACHE:
+            return _TV_SERIES_ID_CACHE[key]
+
+    tmdb_id: Optional[int] = None
+    try:
+        url = (f"https://api.themoviedb.org/3/search/tv?api_key={CFG.TMDB_API_KEY}"
+               f"&query={urllib.parse.quote(show)}&first_air_date_year={year}")
+        data = _http_get_json(url)
+        for r in (data or {}).get("results") or []:
+            if (str(r.get("first_air_date") or "")[:4] == str(year)) and r.get("id"):
+                tmdb_id = int(r["id"])
+                logging.debug("TMDB series resolved: %r (%s) -> %s (%s)",
+                              show, year, tmdb_id, r.get("name"))
+                break
+    except Exception as e:
+        logging.debug("TMDB series lookup failed for %r (%s): %s", show, year, e)
+
+    with _TV_SERIES_ID_LOCK:
+        _TV_SERIES_ID_CACHE[key] = tmdb_id
+    return tmdb_id
+
+
+def _filebot_tmdb_tv_cmd(base_cmd: List[str], show: str, year: Optional[str]) -> Optional[List[str]]:
+    """
+    Build a FileBot command pinned to an exact TMDB series id, for shows
+    TheTVDB cannot find. Passing the bare numeric id as --q makes FileBot use
+    that series instead of searching by name (a --filter cannot steer the
+    search, it only drops candidates the search already produced).
+    """
+    tmdb_id = resolve_tv_series_tmdb_id(show, year)
+    if not tmdb_id:
+        return None
+    return [("TheMovieDB::TV" if a == "TheTVDB" else a) for a in base_cmd] + ["--q", str(tmdb_id)]
+
+
 def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = None) -> List[str]:
     """
-    Build a FileBot --filter constraining the match to the film's year (±1 for
-    release-year drift). Movies only: for TV the query year is the series start
-    year, which must not constrain episode matching.
+    Build a FileBot --filter constraining the match to the title's year (±1 for
+    release-date drift). For TV the year is the series' first-air year, which is
+    exactly what distinguishes same-named shows.
 
-    Without this, a failed title lookup can silently match a same-title film
-    from a different year (e.g. 'The Film 2026' -> 'The Film (1984)').
+    Without this, a failed lookup can silently match a same-title film or series
+    from a different year ('The Film 2026' -> 'The Film (1984)';
+    'Show Name (2026)' -> 'Show Name (2024)').
     """
-    if db == "TheTVDB":
-        return []
     y_str = year
     if not y_str and query:
         m_year = re.search(r"\((\d{4})\)", query)
@@ -1054,26 +1107,45 @@ def run_filebot_rename_final_mkv(
         "--conflict", "override",
         "-non-strict",
     ]
-    # Year constraint (movies only): stops a same-title film from another year
-    # winning when the title match is imperfect. ±1 absorbs release-year drift.
+    # For TV the query carries the series year ('Show Name (2026)'): search on the
+    # bare name and use the year as a constraint instead.
+    is_tv_db = (db == "TheTVDB")
+    show_year: Optional[str] = None
+    search_q = query
+    if is_tv_db and query:
+        ym = re.search(r"\((\d{4})\)", query)
+        show_year = ym.group(1) if ym else None
+        search_q = re.sub(r"\s*\(\d{4}\)\s*$", "", query).strip() or query
+
+    # Year constraint: stops a same-title film/series from another year winning
+    # when the title match is imperfect. ±1 absorbs release-date drift.
     year_filter = _filebot_year_filter(query, db)
 
     # Override FileBot's filename-based search with a clean title so release
     # noise in the original filename doesn't corrupt the DB lookup result.
-    cmd = base_cmd + (["--q", query] if query else []) + year_filter
-    if query:
-        logging.debug("FileBot query override: %s", query)
+    cmd = base_cmd + (["--q", search_q] if search_q else []) + year_filter
+    if search_q:
+        logging.debug("FileBot query override: %s", search_q)
 
     r = run_cmd(cmd, timeout_sec=1200)
 
-    # Fallback: our inferred title can itself be wrong (odd release naming), and
-    # then the query is what blocks the match. Retry once letting FileBot parse
-    # the filename with its own release-name parser — but keep the year
-    # constraint, so a wrong-year film is never chosen silently.
-    if not r.ok and query and mkv.exists():
-        logging.info("FileBot found no match for query %r — retrying without query%s: %s",
-                     query, " (year-constrained)" if year_filter else "", mkv.name)
-        r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
+    if not r.ok and mkv.exists():
+        if is_tv_db and show_year:
+            # The series is not on TheTVDB (common for regional shows). Resolve
+            # it on TMDB and pin FileBot to that exact series id.
+            tmdb_cmd = _filebot_tmdb_tv_cmd(base_cmd, search_q or "", show_year)
+            if tmdb_cmd:
+                logging.info("TheTVDB has no %s (%s) — using the TMDB series entry instead: %s",
+                             search_q, show_year, mkv.name)
+                r = run_cmd(tmdb_cmd, timeout_sec=1200)
+        elif query:
+            # Our inferred title can itself be wrong (odd release naming), and
+            # then the query is what blocks the match. Retry once letting FileBot
+            # parse the filename — still year-constrained, so a wrong-year title
+            # is never chosen silently.
+            logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                         query, " (year-constrained)" if year_filter else "", mkv.name)
+            r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
 
     out_txt = (r.out or "").strip()
     err_txt = (r.err or "").strip()
@@ -3955,8 +4027,10 @@ def pipeline_embed_cover(mkv: Optional[Path], is_tv: bool, dry_run: bool) -> Non
 RENAME_HISTORY_CSV = _SCRIPT_DIR / "logs" / "rename_history.csv"
 
 # Library-organizing formats for --rename-into (folder structure prepended).
+# The show folder de-duplicates the year the same way the filename does.
 MOVIE_FILEBOT_FORMAT_DIR = "{n} ({y})/" + MOVIE_FILEBOT_FORMAT
-TV_FILEBOT_FORMAT_DIR = "{n} ({y})/Season {s.pad(2)}/" + TV_FILEBOT_FORMAT
+TV_FILEBOT_FORMAT_DIR = (r"{n.replaceAll(/\s*\(\d{4}\)$/, '')} ({y})/Season {s.pad(2)}/"
+                         + TV_FILEBOT_FORMAT)
 
 
 def _append_rename_history(batch_id: str, pairs: List[Tuple[Path, Path]]) -> None:
@@ -4080,8 +4154,11 @@ def process_rename_one(
                 fix_track_langs_inplace(mkv, tracks, force_audio_langs or {}, force_sub_langs or {})
 
         # Clean query so release noise in the filename doesn't corrupt the DB lookup.
+        tv_year: Optional[str] = None
         if is_tv:
             show_name, _s, _e, _t = infer_tv_components(mkv)
+            ym = re.search(r"\((\d{4})\)", show_name or "")
+            tv_year = ym.group(1) if ym else None
             query = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip() or None
             db = "TheTVDB"
             fmt = TV_FILEBOT_FORMAT_DIR if target_root else TV_FILEBOT_FORMAT
@@ -4113,10 +4190,11 @@ def process_rename_one(
             "--conflict", "skip",
             "-non-strict",
         ]
-        # Year constraint (movies only) so a same-title film from another year
-        # can never win a fuzzy match.
-        year_filter = _filebot_year_filter(query, db, year=None if is_tv else year)
-        base_cmd = list(cmd) + year_filter
+        # Year constraint so a same-title film/series from another year can
+        # never win a fuzzy match (TV uses the series' first-air year).
+        plain_cmd = list(cmd)
+        year_filter = _filebot_year_filter(query, db, year=tv_year if is_tv else year)
+        base_cmd = plain_cmd + year_filter
         if query:
             cmd += ["--q", query]
         cmd += year_filter
@@ -4124,16 +4202,28 @@ def process_rename_one(
         r = run_cmd(cmd, timeout_sec=600)
         out_txt = (r.out or "").strip()
 
-        # Fallback: a wrong inferred title blocks the match, so retry once and
-        # let FileBot parse the filename with its own release-name parser —
-        # still year-constrained, so a wrong-year match is never chosen.
         # (In --action test, rc is 1 even on success — judge by the output.)
-        matched = ("[TEST]" in out_txt or "skipped" in out_txt.lower()) if dry_run else r.ok
-        if query and not matched and mkv.exists():
-            logging.info("FileBot found no match for query %r — retrying without query%s: %s",
-                         query, " (year-constrained)" if year_filter else "", mkv.name)
-            r = run_cmd(base_cmd, timeout_sec=600)
-            out_txt = (r.out or "").strip()
+        def _matched(res: CmdResult, text: str) -> bool:
+            return ("[TEST]" in text or "skipped" in text.lower()) if dry_run else res.ok
+
+        if not _matched(r, out_txt) and mkv.exists():
+            if is_tv and tv_year:
+                # Series absent from TheTVDB (common for regional shows):
+                # resolve it on TMDB and pin FileBot to that exact series id.
+                tmdb_cmd = _filebot_tmdb_tv_cmd(plain_cmd, query or "", tv_year)
+                if tmdb_cmd:
+                    logging.info("TheTVDB has no %s (%s) — using the TMDB series entry instead: %s",
+                                 query, tv_year, mkv.name)
+                    r = run_cmd(tmdb_cmd, timeout_sec=600)
+                    out_txt = (r.out or "").strip()
+            elif query:
+                # A wrong inferred title blocks the match, so retry once letting
+                # FileBot parse the filename — still year-constrained, so a
+                # wrong-year match is never chosen.
+                logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                             query, " (year-constrained)" if year_filter else "", mkv.name)
+                r = run_cmd(base_cmd, timeout_sec=600)
+                out_txt = (r.out or "").strip()
 
         if dry_run:
             # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.
