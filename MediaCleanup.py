@@ -709,6 +709,8 @@ def print_results_table(title: str, results: List[Result]) -> None:
 
         if not r.ok:
             detail = r.reason
+        elif r.details.get("predicted"):
+            detail = f"-> {r.details['predicted']}"
         elif r.kind == "rename" and (r.details.get("new") or r.details.get("proposed")):
             detail = f"-> {Path(str(r.details.get('new') or r.details.get('proposed'))).name}"
         elif r.kind == "coverart":
@@ -3628,6 +3630,7 @@ class MetadataFetcher:
                 "rating": rating,
                 "collection": ((data.get("belongs_to_collection") or {}).get("name") or None),
                 "orig_lang": data.get("original_language") or None,  # ISO 639-1
+                "imdb_id": data.get("imdb_id") or None,
                 "tmdb_id": tmdb_id,
             }
 
@@ -4962,6 +4965,92 @@ def build_movie_output_name(
     return fn
 
 
+# --preview-exact: ask FileBot itself for the dry-run name instead of predicting
+# it from the database. Authoritative but costs a JVM launch per item.
+_PREVIEW_EXACT: bool = False
+
+
+def _filebot_preview_name(sample: Path, db: str, fmt: str, query: Optional[str],
+                          year: Optional[str], langs: List[str]) -> Optional[str]:
+    """
+    Ask FileBot what it would name this file (`--action test`, writes nothing).
+
+    The merged output does not exist yet during a dry run, so the probe runs
+    against the source that supplies the video — its resolution, codec and
+    source tag are the ones the output will carry. Only the audio set differs
+    after a merge, so the language bracket is substituted with the merged one.
+    """
+    if not CFG.FILEBOT_EXE.exists() or _FILEBOT_DISABLED or not sample.exists():
+        return None
+    cmd = [str(CFG.FILEBOT_EXE), "-rename", str(sample),
+           "--db", db, "--format", fmt, "--output", str(sample.parent),
+           "--action", "test", "--conflict", "skip", "-non-strict"]
+    if query:
+        cmd += ["--q", query]
+    cmd += _filebot_year_filter(query, db, year=year)
+
+    r = run_cmd(cmd, timeout_sec=600)
+    m_name = re.search(r"\[TEST\] from \[.+?\] to \[(.+?)\]\s*$", (r.out or ""), flags=re.M)
+    if not m_name:
+        return None
+    name = Path(m_name.group(1)).name
+    if langs:
+        name = re.sub(r"\[[^\]]*\](?=\.mkv$)", f"[{build_audio_bracket(langs)}]", name)
+    return name
+
+
+def predict_movie_final_name(sample: Path, title: str, year: Optional[str], imdb_id: Optional[str],
+                             res_tag: str, source_tag: Optional[str], codec_tag: str,
+                             langs: List[str], exact: bool) -> Optional[str]:
+    """Best estimate of the filename a real run would end up with, for --dry-run."""
+    if exact:
+        name = _filebot_preview_name(
+            sample, CFG.FILEBOT_DB, MOVIE_FILEBOT_FORMAT,
+            f"{title} ({year})" if title and year else (title or None), year, langs)
+        if name:
+            return name
+    # Database prediction: the canonical title and IMDB id are the parts the
+    # rename adds; resolution/codec/source/languages we already computed.
+    if _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY:
+        try:
+            meta = _get_meta_fetcher().movie_metadata(title, year, imdb_id)
+            if meta:
+                return build_movie_output_name(
+                    meta.get("title") or title, meta.get("year") or year,
+                    imdb_id or meta.get("imdb_id"), res_tag, source_tag, codec_tag, langs)
+        except Exception as e:
+            logging.debug("Name prediction failed for %s: %s", sample.name, e)
+    return None
+
+
+def predict_tv_final_name(sample: Path, show: str, season_str: Optional[str], ep_str: Optional[str],
+                          ep_title: Optional[str], res_tag: str, codec_tag: str,
+                          langs: List[str], exact: bool) -> Optional[str]:
+    """Best estimate of the episode filename a real run would produce, for --dry-run."""
+    search = re.sub(r"\s*\(\d{4}\)\s*$", "", show or "").strip() or None
+    ym = re.search(r"\((\d{4})\)", show or "")
+    show_year = ym.group(1) if ym else None
+
+    if exact:
+        name = _filebot_preview_name(sample, "TheTVDB", TV_FILEBOT_FORMAT, search, show_year, langs)
+        if name:
+            return name
+    if _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY and season_str and ep_str:
+        try:
+            meta = _get_meta_fetcher().episode_metadata(
+                show, None, int(season_str[1:]), int(ep_str[1:]))
+            if meta:
+                show_disp = meta.get("show") or show
+                if meta.get("show_year") and "(" not in show_disp:
+                    show_disp = f"{show_disp} ({meta['show_year']})"
+                return build_tv_output_name(show_disp, season_str, ep_str,
+                                            meta.get("ep_title") or ep_title,
+                                            res_tag, codec_tag, langs)
+        except Exception as e:
+            logging.debug("Name prediction failed for %s: %s", sample.name, e)
+    return None
+
+
 def process_movie_group(
     group: List[Path],
     movies_root: Path,
@@ -5051,6 +5140,16 @@ def process_movie_group(
 
         source_tag = infer_source_tag_from_filename(group[0].name)
 
+        # Dry runs skip the whole finishing chain, so the remux target name says
+        # nothing about the database rename that follows. Predict the real one.
+        predicted_name: Optional[str] = None
+        if dry_run:
+            predicted_name = predict_movie_final_name(
+                best_video_file, movie_name, year, imdb_id, res_tag, source_tag,
+                codec_tag, selected_audio_langs, exact=_PREVIEW_EXACT)
+            if predicted_name:
+                logging.info("[DRY] Final name would be: %s", predicted_name)
+
         # ── SKIP-REMUX / RULE-7 CHECKS (single-file groups only) ─────────────
         if len(group) == 1:
             _all_tracks_single = metas[list(metas.keys())[0]][0]
@@ -5084,7 +5183,7 @@ def process_movie_group(
                 pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_no_target_langs OK -> %s", out_done)
                 return Result(kind="movie_no_target_langs", source_items=group, output_path=out_done, ok=True,
-                              details={"reason": "no_target_languages_found"})
+                              details={"reason": "no_target_languages_found", "predicted": predicted_name})
 
             # Rules 1,2,5,6: all audio tracks are target languages — no remux needed
             if _actual_audio_count == _total_target_audio_count:
@@ -5117,7 +5216,8 @@ def process_movie_group(
                 pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_skip_remux OK -> %s", out_done)
                 return Result(kind="movie_skip_remux", source_items=group, output_path=out_done, ok=True,
-                              details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks"})
+                              details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
+                                       "predicted": predicted_name})
 
             # Rules 3,4: has target langs + extra languages — remux to strip extras
             logging.info("movie: file has %d audio tracks total, %d are target langs — remuxing to strip extras.",
@@ -5275,7 +5375,8 @@ def process_movie_group(
         pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
 
         return Result(kind=kind, source_items=group, output_path=out_done, ok=True,
-                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs})
+                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs,
+                               "predicted": predicted_name})
 
     except FileExistsError as e:
         return Result(kind=kind, source_items=group, output_path=None, ok=False, reason=str(e))
@@ -5448,6 +5549,15 @@ def process_tv_file(
         if codec_tag in ("unknown", "video"):
             codec_tag = infer_codec_tag_from_filename(str(src)) or codec_tag
 
+        # Dry runs skip the finishing chain, so predict the post-rename name.
+        predicted_name: Optional[str] = None
+        if dry_run:
+            predicted_name = predict_tv_final_name(
+                src, show_name, season_str, ep_str, ep_title, res_tag, codec_tag,
+                selected_audio_langs, exact=_PREVIEW_EXACT)
+            if predicted_name:
+                logging.info("[DRY] Final name would be: %s", predicted_name)
+
         # ── SKIP-REMUX / RULE-7 CHECKS ───────────────────────────────────────
         _actual_audio_count = sum(1 for t in tracks if t.type == "audio" and not is_excluded_audio(t))
         _total_target_audio_count = sum(len(v) for v in audios.values())
@@ -5476,7 +5586,7 @@ def process_tv_file(
             pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_no_target_langs OK -> %s", out_done)
             return Result(kind="tv_no_target_langs", source_items=[src], output_path=out_done, ok=True,
-                          details={"reason": "no_target_languages_found"})
+                          details={"reason": "no_target_languages_found", "predicted": predicted_name})
 
         # Rules 1,2,5,6: all audio tracks in the file are already target languages — no remux needed
         _no_extra_tracks = _actual_audio_count == _total_target_audio_count
@@ -5509,7 +5619,8 @@ def process_tv_file(
             pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_skip_remux OK -> %s", out_done)
             return Result(kind="tv_skip_remux", source_items=[src], output_path=out_done, ok=True,
-                          details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks"})
+                          details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
+                                   "predicted": predicted_name})
 
         # Rules 3,4: has target langs + extra languages — remux to strip extras
         logging.info("tv: file has %d audio tracks total, %d are target langs — remuxing to strip extras.",
@@ -5635,7 +5746,8 @@ def process_tv_file(
         pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
 
         return Result(kind=kind, source_items=[src], output_path=out_done, ok=True,
-                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs})
+                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs,
+                           "predicted": predicted_name})
 
     except FileExistsError as e:
         return Result(kind=kind, source_items=[src], output_path=None, ok=False, reason=str(e))
@@ -5774,6 +5886,10 @@ def main() -> int:
                     help="Test the API keys in MediaCleanup.toml with one cheap call each "
                          "(TMDB, fanart.tv, OMDb, OpenSubtitles), print a verdict per key, and exit. "
                          "Exit code 1 if any configured key is invalid.")
+    ap.add_argument("--preview-exact", action="store_true",
+                    help="With --dry-run: ask FileBot itself for each predicted filename instead of "
+                         "predicting it from the database. Authoritative but much slower (one FileBot "
+                         "launch per item). Default: fast database prediction.")
     ap.add_argument("--no-fetch-tags", action="store_true",
                     help="Disable rich metadata tagging (genre/director/actors/synopsis from TMDB+OMDb) "
                          "during tag cleaning. Default: enabled whenever API keys are configured.")
@@ -5836,10 +5952,16 @@ def main() -> int:
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
 
-    global _FETCH_TAGS_ENABLED
+    global _FETCH_TAGS_ENABLED, _PREVIEW_EXACT
     if args.no_fetch_tags:
         _FETCH_TAGS_ENABLED = False
         logging.info("Rich metadata tagging disabled (--no-fetch-tags).")
+    if args.preview_exact:
+        if not args.dry_run:
+            logging.error("--preview-exact only applies to --dry-run.")
+            return 2
+        _PREVIEW_EXACT = True
+        logging.info("Exact preview enabled: FileBot will be asked for each name (slower).")
 
     # --validate-keys standalone: test each configured API key and exit.
     if args.validate_keys:

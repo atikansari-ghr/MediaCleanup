@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-08-07
+
+### Added
+- **Dry-run shows the real final filename.** Previews reported the intermediate remux target, omitting everything the database rename adds — `Another Film (2026) - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv` where a real run produces `Another Film (2026) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv`. `--dry-run` now resolves the canonical title and IMDB id (cached TMDB call) and reports the predicted final name in the log and the summary table, for the skip-remux path as well.
+- **`--preview-exact`** — with `--dry-run`, asks FileBot itself for each name instead of predicting it. Authoritative but launches a JVM per item (~4 s vs ~1 s); both modes produced identical names in testing.
+
 ## [1.4.2] — 2026-08-06
 
 ### Fixed

@@ -89,13 +89,32 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | Flag | Meaning |
 |---|---|
 | `--filter PATTERN` | Only process items matching a case-insensitive glob (`A*` ≡ `a*`), tested against the movie/show **folder name** and the **MKV filename** (either match includes the file). Repeatable: `--filter "A*" --filter "B*"`. Works in every mode. |
-| `--dry-run` | Log all planned actions; write nothing. `--coverart` dry-run also stays fully offline. |
+| `--dry-run` | Log all planned actions; write nothing. Shows the **predicted final filename** for every item (see below). `--coverart` dry-run stays fully offline. |
+| `--preview-exact` | With `--dry-run`: ask FileBot itself for each predicted name instead of predicting it from the database. Authoritative but much slower — one FileBot launch per item. |
 | `--verbose` | Debug logging (track decisions, full command lines). |
 | `--workers N` | Parallel worker threads (default: CPU count − 1). |
 | `--log-file PATH` | Also write the log to a file (always plain text). |
 | `--no-color` | Disable colored output and summary tables (`NO_COLOR` env also honored). |
 
 ---
+
+## Previewing a run
+
+`--dry-run` reports, for every file, the name it would end up with **after** the database rename — not the intermediate remux target:
+
+```
+[DRY] Final name would be: Another Film (2026) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv
+```
+
+The prediction resolves the canonical title and IMDB id through TMDB (cached, one cheap call per title); resolution, codec, source tag and languages are computed from the files themselves. It covers the skip-remux path too, so files that are only renamed also show their new name.
+
+`--preview-exact` instead asks FileBot for each name — the same tool that performs the real rename. It is authoritative but launches a JVM per item (roughly 4 s vs 1 s in testing), so it suits spot-checking a few titles rather than sweeping a library:
+
+```bat
+python MediaCleanup.py --dry-run --movies --filter "Another Film*" --preview-exact
+```
+
+Either way a preview is an estimate: the database is consulted again at run time. `--no-fetch-tags` disables prediction and falls back to the heuristic name.
 
 ## Target languages
 
