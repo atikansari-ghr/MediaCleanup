@@ -1044,6 +1044,45 @@ def _filebot_tmdb_tv_cmd(base_cmd: List[str], show: str, year: Optional[str]) ->
     return [("TheMovieDB::TV" if a == "TheTVDB" else a) for a in base_cmd] + ["--q", str(tmdb_id)]
 
 
+def _title_with_year_query(query: Optional[str]) -> Optional[str]:
+    """
+    Reinterpret 'Title (Year)' as a title that ENDS in that year — 'The Film
+    (1984)' -> 'The Film 1984'. Returns None when there is no year to fold in.
+    """
+    if not query:
+        return None
+    m_year = re.search(r"^(.*?)\s*\((\d{4})\)\s*$", query)
+    if not m_year or not m_year.group(1).strip():
+        return None
+    return f"{m_year.group(1).strip()} {m_year.group(2)}"
+
+
+def _verified_title_year_retry(query: Optional[str]) -> Optional[Tuple[str, List[str]]]:
+    """
+    For files whose name carries no release year, the parsed 'year' may really be
+    the end of the title ('The Film.1984.1080p...'). Confirm that reading
+    against TMDB before acting on it: the film it finds must itself carry the
+    year in its title. Returns (query, year_filter) pinned to that film's real
+    year, or None when the reading is wrong.
+
+    The verification matters — searching 'The Film 1984' unconstrained makes
+    FileBot answer 'The Film (2017)'.
+    """
+    merged = _title_with_year_query(query)
+    if not merged or not (_FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY):
+        return None
+    year_token = merged.rsplit(" ", 1)[-1]
+    try:
+        meta = _get_meta_fetcher().movie_metadata(merged, None, None)
+    except Exception:
+        return None
+    if not meta or year_token not in str(meta.get("title") or ""):
+        return None
+    real_year = meta.get("year")
+    logging.info("Year is part of the title: %r is %s (%s)", merged, meta.get("title"), real_year)
+    return merged, _filebot_year_filter(None, CFG.FILEBOT_DB, year=real_year)
+
+
 def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = None) -> List[str]:
     """
     Build a FileBot --filter constraining the match to the title's year (±1 for
@@ -1141,13 +1180,24 @@ def run_filebot_rename_final_mkv(
                              search_q, show_year, mkv.name)
                 r = run_cmd(tmdb_cmd, timeout_sec=1200)
         elif query:
-            # Our inferred title can itself be wrong (odd release naming), and
-            # then the query is what blocks the match. Retry once letting FileBot
-            # parse the filename — still year-constrained, so a wrong-year title
-            # is never chosen silently.
-            logging.info("FileBot found no match for query %r — retrying without query%s: %s",
-                         query, " (year-constrained)" if year_filter else "", mkv.name)
-            r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
+            # The 'year' may actually be part of the title ('The Film 1984')
+            # when the filename carries no release year. Try that reading before
+            # giving up — the constrained attempt has already failed, so this
+            # cannot mask a wrong-year match.
+            retry = _verified_title_year_retry(query)
+            if retry:
+                merged_q, merged_filter = retry
+                logging.info("Retrying as %r: %s", merged_q, mkv.name)
+                r = run_cmd(base_cmd + ["--q", merged_q] + merged_filter, timeout_sec=1200)
+
+            if not r.ok:
+                # Our inferred title can itself be wrong (odd release naming), and
+                # then the query is what blocks the match. Retry once letting FileBot
+                # parse the filename — still year-constrained, so a wrong-year title
+                # is never chosen silently.
+                logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                             query, " (year-constrained)" if year_filter else "", mkv.name)
+                r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
 
     out_txt = (r.out or "").strip()
     err_txt = (r.err or "").strip()
@@ -1916,7 +1966,9 @@ _SITE_TLDS = (
     "party|promo|link|life|xyz|club|space|site|online|store|fun|icu|pro|app|unblockit|wtf|cam|"
     "lol|bar|cfd|mom|now|rest|sbs|vip|wiki|work|blue|red|green|digital|website|tel|cyou|lat|boo"
 )
-_DOMAIN_LABELS = r"[A-Za-z0-9][\w-]*(?:\.[A-Za-z0-9][\w-]*)*?"
+# At most three labels before the TLD: a real domain is short, and letting this
+# span further swallows dotted titles ('The.Film.Name...WEB-DL.Hindi.TV').
+_DOMAIN_LABELS = r"[A-Za-z0-9][\w-]*(?:\.[A-Za-z0-9][\w-]*){0,2}?"
 _SITE_PREFIX_RX = re.compile(
     r"^\s*[\[\(]?\s*"
     r"(?:"
@@ -1926,8 +1978,9 @@ _SITE_PREFIX_RX = re.compile(
     # 'www.' with an unknown TLD, but clearly separated from the title by a dash
     r"|www\.\S+(?=\s*[-–—])"
     # bare domain: strict — the TLD must NOT be followed by more of a dotted
-    # title, so 'Dotted.Title.One' is never mistaken for a domain
-    r"|" + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")(?![.\w])"
+    # title ('Dotted.Title.One') nor by a hyphen ('...Hindi.TV-DL'), so
+    # neither is ever mistaken for a domain
+    r"|" + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")(?![-.\w])"
     r")"
     r"\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
     re.IGNORECASE,
@@ -2038,10 +2091,15 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
         before = s[:m.start()].strip()
         s = before if before else s.replace(m.group(0), " ")
     else:
-        m2 = re.search(r"\b(19\d{2}|20\d{2})\b", s)
+        # Titles can END in a year ('The Film 1984', 'The Sequel 2049',
+        # '2012', '1917'), which puts TWO year tokens side by side:
+        # 'The.Film.1984.2020.1080p'. The last of an adjacent run is the
+        # release year; earlier ones belong to the title.
+        m2 = re.search(r"\b(19\d{2}|20\d{2})(?:[\s._\-]+(19\d{2}|20\d{2}))*\b", s)
         if m2:
-            year = m2.group(1)
-            before = s[:m2.start()].strip()
+            year = m2.group(2) or m2.group(1)
+            cut = m2.end() - len(year)          # keep any earlier year in the title
+            before = s[:cut].strip(" .-_")
             s = before if before else re.sub(r"\b" + re.escape(year) + r"\b", " ", s)
 
     # Remove common "release junk" tokens from title
@@ -4351,13 +4409,25 @@ def process_rename_one(
                     r = run_cmd(tmdb_cmd, timeout_sec=600)
                     out_txt = (r.out or "").strip()
             elif query:
-                # A wrong inferred title blocks the match, so retry once letting
-                # FileBot parse the filename — still year-constrained, so a
-                # wrong-year match is never chosen.
-                logging.info("FileBot found no match for query %r — retrying without query%s: %s",
-                             query, " (year-constrained)" if year_filter else "", mkv.name)
-                r = run_cmd(base_cmd, timeout_sec=600)
-                out_txt = (r.out or "").strip()
+                # The 'year' may be part of the title ('The Film 1984') when
+                # the filename carries no release year. Try that reading first —
+                # the constrained attempt already failed, so this cannot mask a
+                # wrong-year match.
+                retry = _verified_title_year_retry(query)
+                if retry:
+                    merged_q, merged_filter = retry
+                    logging.info("Retrying as %r: %s", merged_q, mkv.name)
+                    r = run_cmd(plain_cmd + ["--q", merged_q] + merged_filter, timeout_sec=600)
+                    out_txt = (r.out or "").strip()
+
+                if not _matched(r, out_txt):
+                    # A wrong inferred title blocks the match, so retry once letting
+                    # FileBot parse the filename — still year-constrained, so a
+                    # wrong-year match is never chosen.
+                    logging.info("FileBot found no match for query %r — retrying without query%s: %s",
+                                 query, " (year-constrained)" if year_filter else "", mkv.name)
+                    r = run_cmd(base_cmd, timeout_sec=600)
+                    out_txt = (r.out or "").strip()
 
         if dry_run:
             # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.

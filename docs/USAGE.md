@@ -336,6 +336,9 @@ python MediaCleanup.py --coverart  --clear --tv --filter "Show Name*"   :: remov
 **A TV episode is renamed to a different show with the same name**
 Shouldn't happen any more. TV lookups are constrained to the series year from the folder/filename, and if TheTVDB has no matching series the script resolves it on TMDB and pins FileBot to that exact series id. This matters for regional shows: the Bengali *Show Name* (2026) has no TheTVDB entry at all, so FileBot used to silently substitute the English *Show Name* (2024). Make sure the show folder or filename carries the right year — that year is the constraint.
 
+**A film whose title contains a year (The Film 1984, The Sequel 2049, 1917, 2012)**
+Handled. Such releases carry two year tokens — `The.Film.1984.2020.1080p...` — and the last one is taken as the release year, keeping the earlier one in the title. When the filename has no release year at all (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, but only after checking against the database that a film by that name really exists — so `The Film 1984` resolves to the 2020 film rather than the 2017 one.
+
 **A movie is renamed to the wrong year (e.g. a 2026 film matched to a 1984 remake)**
 Shouldn't happen any more: movie lookups are constrained to the year in the filename (±1 for release-date drift), so a same-title film from another year can never win. If the correct title genuinely can't be found under that year, the file is reported **FAILED** rather than renamed to a wrong guess — check the summary table.
 

@@ -3,6 +3,13 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] — 2026-08-10
+
+### Fixed
+- **Films whose title contains a year were mis-parsed** — `The.Film.1984.2020.1080p...` read 1984 as the release year and truncated the title to `The Film`. The resulting year filter then excluded the correct match: FileBot found `The Film 1984 (2020)` and threw it away. The last token of an adjacent year run is now the release year, keeping earlier ones in the title. Also fixes `The.Sequel.2049.2017`, and `2012.2009` / `1917.2019`, whose titles previously became the year itself.
+- **Title-with-year retry** — when a filename carries no release year (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, verified against TMDB first (the film found must carry the year in its own title) and pinned to that film's real year. Without the verification an unconstrained search answers `The Film (2017)`.
+- **Release tags mistaken for a domain** — `The.Film.Name.2025.1080p.WEB-DL.Hindi.TV-DL.Chinese...` matched `...Hindi.TV` as a site domain (`tv` is a TLD, and the following `-` passed the guard), leaving the title as `DL Chinese`. Domain detection is now limited to three labels and rejects a TLD followed by a hyphen.
+
 ## [1.5.0] — 2026-08-07
 
 ### Added
