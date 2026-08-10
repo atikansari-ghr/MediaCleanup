@@ -60,7 +60,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
 | `--clear` | Removal modifier. With `--cleantags`: wipe **all** tags, the segment title and every track name, writing nothing back (offline). With `--coverart`: delete embedded cover art and forget the file in the ledger so a later run re-fetches it. |
-| `--rename` | Standalone: FileBot-rename every MKV in scope into the canonical format. Requires exactly one of `--movies`/`--tv`. See [Renaming downloads](#renaming-downloads). |
+| `--rename` | Standalone: FileBot-rename every MKV in scope into the canonical format. Requires exactly one of `--movies`/`--tv`. See [Renaming messy filenames](#renaming-messy-filenames). |
 | `--rename-into` | With `--rename`: move files into the library structure under the configured roots. |
 | `--rename-undo` | Revert the most recent `--rename` batch, then exit. |
 | `--subtitles` | Standalone: download missing subtitles from OpenSubtitles.com as sidecar `.srt` files. See [Subtitles](#subtitles). |
@@ -201,9 +201,9 @@ python MediaCleanup.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
 
 ---
 
-## Renaming downloads
+## Renaming messy filenames
 
-`--rename` fixes badly-named downloads via FileBot without remuxing or touching tags:
+`--rename` fixes badly-named files via FileBot without remuxing or touching tags:
 
 ```bat
 :: Preview (FileBot's test mode shows the actual proposed names)

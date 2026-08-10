@@ -16,13 +16,13 @@ Plus standalone maintenance modes:
 
 - `--cleantags` — strip promotional tags, advertising attachments, and junk track names in-place, no remux; embeds full metadata (genre, director, cast, synopsis, ratings) when API keys are configured.
 - `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art, with an HTML review gallery.
-- `--rename` — FileBot-rename messy downloads into a canonical format, with full undo.
+- `--rename` — FileBot-rename messy filenames into a canonical format, with full undo.
 - `--subtitles` — download missing subtitles from OpenSubtitles as sidecar `.srt` files.
 - `--clear` — removal modifier: wipe all tags (`--cleantags --clear`) or remove embedded cover art (`--coverart --clear`).
 
 ## In action
 
-Rename messy downloads with a safe preview first — real database lookups, exact proposed names:
+Rename messy filenames with a safe preview first — real database lookups, exact proposed names:
 
 ![Rename preview](docs/images/rename-preview.svg)
 
@@ -38,7 +38,7 @@ Verify your API keys before spending any quota:
 
 ```mermaid
 flowchart LR
-    A[/"Messy downloads"/] --> B["Scan & group<br/>variant releases"]
+    A[/"Messy media files"/] --> B["Scan & group<br/>variant releases"]
     B --> C["Pick best video<br/>(HEVC preferred)"]
     B --> D["Collect ALL target-language<br/>audio & subtitles"]
     C --> E["Remux into one clean MKV<br/>(atomic — sources untouched)"]
