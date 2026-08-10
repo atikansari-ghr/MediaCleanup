@@ -14,7 +14,7 @@ For **TV**: applies the same track selection and tag cleaning to each episode fi
 
 Plus standalone maintenance modes:
 
-- `--cleantags` — strip promotional/watermark tags, attachments, and junk track names in-place, no remux; embeds full metadata (genre, director, cast, synopsis, ratings) when API keys are configured.
+- `--cleantags` — strip promotional tags, advertising attachments, and junk track names in-place, no remux; embeds full metadata (genre, director, cast, synopsis, ratings) when API keys are configured.
 - `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art, with an HTML review gallery.
 - `--rename` — FileBot-rename messy downloads into a canonical format, with full undo.
 - `--subtitles` — download missing subtitles from OpenSubtitles as sidecar `.srt` files.
@@ -48,6 +48,18 @@ flowchart LR
     F --> G["FileBot rename to<br/>canonical format"]
     G --> H[/"Plex / Jellyfin-ready library"/]
 ```
+
+## Intended use
+
+MediaCleanup organises **media you already own** — your own disc rips, purchased
+digital downloads, recordings, and home video. It is a local file manager in the
+same family as MKVToolNix, FileBot and tinyMediaManager:
+
+- It **downloads no media** and contains none. It only reads and rewrites files you point it at.
+- It **circumvents no copy protection** and cannot open encrypted discs or DRM-protected files.
+- It changes **container metadata and track selection** — filenames, tags, cover art, subtitle sidecars.
+
+You are responsible for having the right to the files you process.
 
 ## Requirements
 
@@ -141,6 +153,18 @@ TV:      Show Name (2008) - S01E01 - Pilot - 1080p.x265 - [English].mkv
 |---|---|
 | [docs/USAGE.md](docs/USAGE.md) | Full usage guide — every flag, workflows, recipes, troubleshooting |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `MediaCleanup.toml` key explained |
+
+## Credits
+
+Metadata and artwork come from third-party services, used under their respective terms:
+
+- This product uses the **TMDB** API but is not endorsed or certified by TMDB.
+- Artwork may be sourced from **fanart.tv**.
+- Ratings and certifications may be sourced from **OMDb**.
+- Subtitles are downloaded from **OpenSubtitles.com** using your own account.
+
+MKVToolNix, FileBot, Plex and Jellyfin are trademarks of their respective owners;
+this project is an independent tool that works alongside them.
 
 ## License
 

@@ -36,6 +36,16 @@ movies_root = 'D:\Media\Movies'   # source movies (scanned recursively)
 tv_root     = 'D:\Media\TV'       # source TV episodes
 output_root = 'D:\Media\Fixed'    # remuxed output (mirrors source structure)
 
+[naming]
+# Extra filename prefixes to strip before the title is read.
+#
+# Downloads sometimes arrive stamped with the name of the site or tool that
+# produced them ('SomeDistributor.The.Film.2024.1080p.mkv'). Prefixes that look
+# like a web address ('www.something.net - ...') are removed automatically; add
+# any others your own files carry here.
+#   strip_prefixes = ["SomeDistributor", "AnotherName"]
+strip_prefixes = []
+
 [languages]
 # Audio languages to KEEP — everything else is stripped during remux.
 # The list ORDER = audio track order in the output file.

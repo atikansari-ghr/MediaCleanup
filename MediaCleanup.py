@@ -404,6 +404,10 @@ class Config:
     OS_PASSWORD: str = ""
     SUB_LANGS: Tuple[str, ...] = ("en",)
 
+    # Filename prefixes to strip — MediaCleanup.toml [naming] strip_prefixes.
+    # Empty by default; the generic www./domain rule works without it.
+    STRIP_PREFIXES: Tuple[str, ...] = ()
+
     # Similarity grouping for Movies (per-folder)
     SIMILARITY_THRESHOLD_DEFAULT: float = 0.88
 
@@ -493,6 +497,13 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
     paths = data.get("paths", {}) or {}
     coverart = data.get("coverart", {}) or {}
     subtitles = data.get("subtitles", {}) or {}
+    naming = data.get("naming", {}) or {}
+
+    prefixes_raw = naming.get("strip_prefixes") or []
+    if not isinstance(prefixes_raw, list):
+        raise ConfigError("[naming] strip_prefixes must be a list of strings, "
+                          'e.g. strip_prefixes = ["SomeDistributor"]')
+    strip_prefixes = tuple(str(x).strip() for x in prefixes_raw if str(x).strip())
 
     sub_langs_raw = subtitles.get("languages") or ["en"]
     if not isinstance(sub_langs_raw, list):
@@ -561,6 +572,7 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         OS_USERNAME=str(subtitles.get("username", "") or ""),
         OS_PASSWORD=str(subtitles.get("password", "") or ""),
         SUB_LANGS=sub_langs,
+        STRIP_PREFIXES=strip_prefixes,
         LANG_CANONICAL_ORDER=lang_order,
         LANG_DISPLAY_MAP=lang_display,
         LANG_ISO_CODES=lang_iso_codes,
@@ -1119,7 +1131,7 @@ def run_filebot_rename_final_mkv(
     Best-effort: returns original path on failure.
 
     query: clean movie/show title passed as --query to FileBot so it doesn't try to
-           parse the (potentially noisy release) filename for the DB lookup.
+           parse the (potentially noisy) release filename for the DB lookup.
     """
     if dry_run or not mkv or not mkv.exists():
         return mkv
@@ -1162,8 +1174,8 @@ def run_filebot_rename_final_mkv(
     # when the title match is imperfect. ±1 absorbs release-date drift.
     year_filter = _filebot_year_filter(query, db)
 
-    # Override FileBot's filename-based search with a clean title so release
-    # noise in the original filename doesn't corrupt the DB lookup result.
+    # Override FileBot's filename-based search with a clean title so junk
+    # in the original filename doesn't corrupt the DB lookup result.
     cmd = base_cmd + (["--q", search_q] if search_q else []) + year_filter
     if search_q:
         logging.debug("FileBot query override: %s", search_q)
@@ -1954,10 +1966,10 @@ def score_sub(track: Track, include_forced: bool) -> Tuple:
 # Filename inference helpers
 # =========================
 
-# Release-site / tracker prefixes glued onto release filenames, e.g.
-#   'www.example-site.net_-_The Film_2026_...'
-#   'www.example-site.party - Movie Name (2024) ...'
-#   '[www.another-site.com] - Some.Film.2019...'
+# Distributor / website prefixes glued onto downloaded filenames, e.g.
+#   'www.example-site.net_-_The.Film.2024_...'
+#   'www.example-site.org - Movie Name (2024) ...'
+#   '[www.example-site.com] - Some.Film.2019...'
 # Left in place they poison the DB lookup query, so they are stripped before
 # any title inference. The TLD list + the (?![.\w]) guard keep legitimate
 # dotted titles safe ('Dotted.Title.One' is never treated as a domain).
@@ -1973,7 +1985,7 @@ _SITE_PREFIX_RX = re.compile(
     r"^\s*[\[\(]?\s*"
     r"(?:"
     # 'www.' is proof of a domain, so a dot may follow the TLD:
-    # 'www.ExampleSiteE.org.Another Film.2014...' -> 'Another Film.2014...'
+    # 'www.example-site.org.Another Film.2014...' -> 'Another Film.2014...'
     r"www\." + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")\b"
     # 'www.' with an unknown TLD, but clearly separated from the title by a dash
     r"|www\.\S+(?=\s*[-–—])"
@@ -1987,43 +1999,48 @@ _SITE_PREFIX_RX = re.compile(
 )
 
 
-# Known release-site names, stripped even when the trailing part is not a
+# Configured distributor names, stripped even when the trailing part is not a
 # recognizable TLD ('SiteName.Foo.The Film.2026...' -> 'The Film.2026...').
-_SITE_NAME_LIST = (
-    "examplesite26", "examplesite22", "examplesite31", "examplesite29", "examplesite01", "examplesite03",
-    "examplesite18", "examplesite21", "examplesite12", "examplesite10", "examplesite11", "examplesite19",
-    "examplesite13", "examplesite38", "examplesite41", "examplesite25", "examplesite15", "examplesite14",
-    "examplesite27", "examplesite28", "examplesite09", "examplesite33", "examplesite24", "examplesite08",
-    "examplesite05", "examplesite30", "examplesite37", "examplesite36", "examplesite02", "examplesite20",
-    "examplesite04", "examplesite07", "examplesite06", "examplesite16", "examplesite23", "examplesite17",
-    "examplesite34", "examplesite35", "examplesite43", "examplesite42", "examplesite39", "examplesite32", "examplesite40", "examplesite45", "examplesite44",
-)
-# Longest first so 'examplesite15' wins over 'examplesite25' (alternation is first-match).
-_SITE_NAMES = "|".join(sorted(_SITE_NAME_LIST, key=len, reverse=True))
-
-# The label after a KNOWN site name may be an exotic TLD ('SiteName.Foo'), so a
-# wider list is allowed here than for bare-domain detection — but it must still
-# look like a TLD, or 'ExampleSiteA.The Film.Part.Two' would lose 'The Film'.
+# A distributor/tracker label after a configured prefix may be an unusual TLD
+# ('SiteName.foo'), so a wider list is allowed here than for bare-domain
+# detection — it must still look like a TLD, or 'SiteName.The Film.Part.Two' would
+# lose 'The Film'.
 _SITE_LABEL_TLDS = _SITE_TLDS + (
     "|foo|dad|day|esq|fyi|ing|mov|new|phd|prof|rsvp|soy|zip|moi|run|ltd|art|top|men|win|"
     "pw|su|nl|de|fr|es|jp|kr|br|ar|cl|pe|ec|za|ng|ke|pk|bd|lk|np|my|sg|th|vn|id|tr|ir|ae"
 )
-# With an optional TLD-looking trailing label (the '.Foo' in 'SiteName.Foo')
-_SITE_NAME_RX = re.compile(
-    r"^\s*[\[\(]?\s*(?:" + _SITE_NAMES + r")(?:\.(?:" + _SITE_LABEL_TLDS + r")\b)?"
-    r"\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
-    re.IGNORECASE,
-)
-# Site name only — used when the variant above ate the start of the real title
-_SITE_NAME_MIN_RX = re.compile(
-    r"^\s*[\[\(]?\s*(?:" + _SITE_NAMES + r")\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?",
-    re.IGNORECASE,
-)
+
+# Extra filename prefixes to strip, supplied by the user via
+# [naming] strip_prefixes in MediaCleanup.toml (empty by default). Some
+# distributors stamp their own name onto filenames without a valid domain
+# suffix, which the generic domain rule above cannot catch.
+_PREFIX_RX_CACHE: Dict[Tuple[str, ...], Tuple[Optional["re.Pattern[str]"], Optional["re.Pattern[str]"]]] = {}
+_PREFIX_RX_LOCK = threading.Lock()
+
+
+def _configured_prefix_patterns() -> Tuple[Optional["re.Pattern[str]"], Optional["re.Pattern[str]"]]:
+    """Compile (with-label, name-only) matchers for the configured prefixes."""
+    names = tuple(CFG.STRIP_PREFIXES) if CFG is not None else ()
+    if not names:
+        return None, None
+    with _PREFIX_RX_LOCK:
+        if names in _PREFIX_RX_CACHE:
+            return _PREFIX_RX_CACHE[names]
+        # Longest first so a longer prefix wins over a shorter one that is its
+        # leading substring (regex alternation is first-match).
+        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+        with_label = re.compile(
+            r"^\s*[\[\(]?\s*(?:" + alt + r")(?:\.(?:" + _SITE_LABEL_TLDS + r")\b)?"
+            r"\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?", re.IGNORECASE)
+        name_only = re.compile(
+            r"^\s*[\[\(]?\s*(?:" + alt + r")\s*[\]\)]?\s*(?:[-–—]+\s*|\.)?", re.IGNORECASE)
+        _PREFIX_RX_CACHE[names] = (with_label, name_only)
+        return with_label, name_only
 
 
 def strip_site_prefix(stem: str) -> str:
     """
-    Remove a leading release-site/domain prefix from a filename stem.
+    Remove a leading distributor/domain prefix from a filename stem.
     Underscores are normalized to spaces first (so the domain becomes a
     space-delimited token) while dots stay intact for domain matching.
     Returns the original stem when nothing is stripped or nothing would remain.
@@ -2034,16 +2051,19 @@ def strip_site_prefix(stem: str) -> str:
     s = stem.replace("_", " ")
     cleaned = _SITE_PREFIX_RX.sub("", s, count=1)
 
-    # Site names can be chained ('ExampleSiteB.GroupName.Another Film.2014...').
+    # Configured prefixes can be chained ('SiteA.SiteB.The.Film.2014...').
+    with_label, name_only = _configured_prefix_patterns()
     for _ in range(3):
-        candidate = _SITE_NAME_RX.sub("", cleaned, count=1)
+        if with_label is None or name_only is None:
+            break
+        candidate = with_label.sub("", cleaned, count=1)
         if candidate == cleaned:
             break
         # Guard against over-stripping: if the result now starts with the year,
         # the trailing label was actually the film's title
         # ('SiteName.Up.2009' must not become '2009').
         if _starts_with_year(candidate):
-            candidate = _SITE_NAME_MIN_RX.sub("", cleaned, count=1)
+            candidate = name_only.sub("", cleaned, count=1)
             if candidate == cleaned or _starts_with_year(candidate):
                 break
         cleaned = candidate
@@ -2703,12 +2723,12 @@ def clear_mkv_tags(mkv_path: Path, dry_run: bool) -> Result:
 
 def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result:
     """
-    Clean promotional/watermark tags from an MKV in-place using mkvpropedit.
+    Clean promotional/advertising tags from an MKV in-place using mkvpropedit.
 
     Changes made:
       Segment info  : title → movie 'Title (Year)'  or  TV 'Show (Year) - S01E01 - Episode Title'
       Global tags   : all cleared; IMDB tag written back if ID found in filename/folder
-      Attachments   : all deleted (watermark images, fonts from release releases)
+      Attachments   : all deleted (advertising images, stray fonts)
       Video track   : name → same as segment title
       Audio tracks  : name → '<N> channels'  (e.g. '6 channels')
       Subtitle tracks: name → '' (cleared)
@@ -2796,7 +2816,7 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
         cmd: List[str] = [str(CFG.MKVPROPEDIT_EXE), str(mkv_path)]
 
         # 1. Replace ALL global tags with a clean XML.
-        #    Clears release tags (AUTHOR, SUMMARY, WEBSITE, Copyright, Comment, etc.)
+        #    Clears promotional tags (AUTHOR, SUMMARY, WEBSITE, Comment, etc.)
         #    and writes back the IMDb tag if the ID was found in the filename.
         tags_xml: Optional[Path] = None
         if not dry_run:
@@ -2814,7 +2834,7 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
             "--set", f"title={segment_title}",
         ]
 
-        # 3. Delete all attachments (watermark PNGs, custom fonts, etc.).
+        # 3. Delete all attachments (advertising images, stray fonts, etc.).
         #    Selector is plain numeric ID from mkvmerge -J (0-based per mkvpropedit docs).
         #    Embedded cover art (cover.jpg etc., per Matroska convention) is legitimate
         #    metadata written by the --coverart mode — never delete it.
@@ -2941,7 +2961,7 @@ def _cleantags_one(
 ) -> Result:
     """
     Full cleantags sequence for a single file:
-      1. clean_mkv_tags        — strip release tags, write clean segment title + IMDB tag
+      1. clean_mkv_tags        — strip junk tags, write clean segment title + IMDB tag
       2. FileBot rename        — identify via DB using clean title as --query, rename in-place
          Fallback (no FileBot) — insert IMDB ID directly into the filename via Python rename
       3. clean_mkv_tags        — update segment title to match the final filename
@@ -3081,7 +3101,7 @@ def mkv_cover_attachments(meta: Dict[str, Any]) -> Tuple[List[int], bool]:
     Return (cover_attachment_ids, written_by_us).
     written_by_us is True when any cover attachment carries the description
     'Cover art' — the marker this script sets when embedding. Covers without
-    it came with the release (foreign) and are fair game for replacement.
+    it came with the file (third-party) and are fair game for replacement.
     """
     ids: List[int] = []
     ours = False
@@ -3948,7 +3968,7 @@ def process_coverart_one(
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                           ok=True, reason="already_has_cover")
         if existing and not ours and not overwrite_cover:
-            logging.info("Foreign cover found (came with the release) — replacing: %s", mkv_path.name)
+            logging.info("Third-party cover found (came with the file) — replacing: %s", mkv_path.name)
 
         tracks = extract_tracks(mkv_path, meta)
         detected = {detect_language_canonical(t) for t in tracks if t.type == "audio"}
@@ -4345,7 +4365,7 @@ def process_rename_one(
                 tracks = extract_tracks(mkv, meta)
                 fix_track_langs_inplace(mkv, tracks, force_audio_langs or {}, force_sub_langs or {})
 
-        # Clean query so release noise in the filename doesn't corrupt the DB lookup.
+        # Clean query so filename noise doesn't corrupt the DB lookup.
         tv_year: Optional[str] = None
         if is_tv:
             show_name, _s, _e, _t = infer_tv_components(mkv)
@@ -5412,7 +5432,7 @@ def process_movie_group(
                              canon, afile.name, atrack.id, atrack.codec_id, atrack.channels)
 
         if not dry_run:
-            # Step 1: cleantags — strip release tags and write a clean segment title.
+            # Step 1: cleantags — strip junk tags and write a clean segment title.
             # This gives FileBot the best possible signal for DB lookup in step 2.
             if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists() and out_done.exists():
                 logging.info("Auto-cleantags (pre-FileBot) on: %s", out_done.name)
@@ -5783,7 +5803,7 @@ def process_tv_file(
                 logging.info("Selected audio %s: track=%d codec_id=%s channels=%s", canon, t.id, t.codec_id, t.channels)
 
         if not dry_run:
-            # Step 1: cleantags — strip release tags and write clean segment title so
+            # Step 1: cleantags — strip junk tags and write clean segment title so
             # FileBot can identify the episode from clean metadata in step 2.
             if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists() and out_done.exists():
                 logging.info("Auto-cleantags (pre-FileBot) on: %s", out_done.name)
@@ -5923,7 +5943,7 @@ def main() -> int:
                          "applies to both pipelines. Also applies to --cleantags.")
     ap.add_argument("--self-check", action="store_true", help="Run unit-test-like self checks and exit.")
     ap.add_argument("--cleantags", action="store_true",
-                    help="Standalone mode: clean promotional/watermark tags in-place on every MKV in the "
+                    help="Standalone mode: clean promotional/advertising tags in-place on every MKV in the "
                          "scan root using mkvpropedit. Uses --movies/--tv/--input scope flags.")
     ap.add_argument("--coverart", action="store_true",
                     help="Standalone mode: fetch and embed cover art (cover.jpg attachment) into every "
