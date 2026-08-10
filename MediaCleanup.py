@@ -1014,7 +1014,7 @@ def resolve_tv_series_tmdb_id(show: str, year: Optional[str]) -> Optional[int]:
     Resolve a TV series to its TMDB id by name + first-air year.
 
     Used when TheTVDB cannot identify a show at all — regional series are often
-    on TMDB only (e.g. the Bengali 'Show Name' (2026) has no TheTVDB entry), and
+    on TMDB only (a regional series may have no TheTVDB entry at all), and
     FileBot's fuzzy search would otherwise substitute a same-named show.
     """
     if not CFG.TMDB_API_KEY or not show or not year:
@@ -1072,13 +1072,13 @@ def _title_with_year_query(query: Optional[str]) -> Optional[str]:
 def _verified_title_year_retry(query: Optional[str]) -> Optional[Tuple[str, List[str]]]:
     """
     For files whose name carries no release year, the parsed 'year' may really be
-    the end of the title ('The Film.1984.1080p...'). Confirm that reading
+    the end of the title ('The.Film.1984.1080p...'). Confirm that reading
     against TMDB before acting on it: the film it finds must itself carry the
     year in its title. Returns (query, year_filter) pinned to that film's real
     year, or None when the reading is wrong.
 
-    The verification matters — searching 'The Film 1984' unconstrained makes
-    FileBot answer 'The Film (2017)'.
+    The verification matters — an unconstrained search for such a title makes
+    FileBot answer with a different entry in the same series.
     """
     merged = _title_with_year_query(query)
     if not merged or not (_FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY):
@@ -1102,8 +1102,8 @@ def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = No
     exactly what distinguishes same-named shows.
 
     Without this, a failed lookup can silently match a same-title film or series
-    from a different year ('The Film 2026' -> 'The Film (1984)';
-    'Show Name (2026)' -> 'Show Name (2024)').
+    from a different year (a 2026 film matched as its 1984 namesake, or a
+    2026 series matched as a same-named 2024 one).
     """
     y_str = year
     if not y_str and query:
@@ -1972,7 +1972,8 @@ def score_sub(track: Track, include_forced: bool) -> Tuple:
 #   '[www.example-site.com] - Some.Film.2019...'
 # Left in place they poison the DB lookup query, so they are stripped before
 # any title inference. The TLD list + the (?![.\w]) guard keep legitimate
-# dotted titles safe ('Dotted.Title.One' is never treated as a domain).
+# dotted titles safe (a title whose second token is a TLD word such as
+# 'in' or 'to' is never treated as a domain).
 _SITE_TLDS = (
     "com|net|org|info|biz|co|io|me|tv|cc|ws|se|is|in|la|mx|sx|ph|to|ru|ua|eu|uk|us|ag|gd|gl|tw|"
     "party|promo|link|life|xyz|club|space|site|online|store|fun|icu|pro|app|unblockit|wtf|cam|"
@@ -1985,12 +1986,12 @@ _SITE_PREFIX_RX = re.compile(
     r"^\s*[\[\(]?\s*"
     r"(?:"
     # 'www.' is proof of a domain, so a dot may follow the TLD:
-    # 'www.example-site.org.Another Film.2014...' -> 'Another Film.2014...'
+    # 'www.example-site.org.The.Film.2014...' -> 'The.Film.2014...'
     r"www\." + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")\b"
     # 'www.' with an unknown TLD, but clearly separated from the title by a dash
     r"|www\.\S+(?=\s*[-–—])"
     # bare domain: strict — the TLD must NOT be followed by more of a dotted
-    # title ('Dotted.Title.One') nor by a hyphen ('...Hindi.TV-DL'), so
+    # title ('Some.in.Title') nor by a hyphen ('...Hindi.TV-DL'), so
     # neither is ever mistaken for a domain
     r"|" + _DOMAIN_LABELS + r"\.(?:" + _SITE_TLDS + r")(?![-.\w])"
     r")"
@@ -2000,11 +2001,11 @@ _SITE_PREFIX_RX = re.compile(
 
 
 # Configured distributor names, stripped even when the trailing part is not a
-# recognizable TLD ('SiteName.Foo.The Film.2026...' -> 'The Film.2026...').
+# recognizable TLD ('SiteName.Foo.The.Film.2026...' -> 'The.Film.2026...').
 # A distributor/tracker label after a configured prefix may be an unusual TLD
 # ('SiteName.foo'), so a wider list is allowed here than for bare-domain
-# detection — it must still look like a TLD, or 'SiteName.The Film.Part.Two' would
-# lose 'The Film'.
+# detection — it must still look like a TLD, or 'SiteName.Some.Short.Title'
+# would lose its first word.
 _SITE_LABEL_TLDS = _SITE_TLDS + (
     "|foo|dad|day|esq|fyi|ing|mov|new|phd|prof|rsvp|soy|zip|moi|run|ltd|art|top|men|win|"
     "pw|su|nl|de|fr|es|jp|kr|br|ar|cl|pe|ec|za|ng|ke|pk|bd|lk|np|my|sg|th|vn|id|tr|ir|ae"
@@ -2103,7 +2104,7 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
 
     # Extract year. Scene convention is 'Title.Year.Quality.Source.Lang.Tags' —
     # when there is title text BEFORE the year, everything AFTER it is release
-    # junk (e.g. 'The.Film.2026.1080p.WEB-DL.Hindi.ESubs'), so truncate.
+    # junk (e.g. 'The.Film.Name.2026.1080p.WEB-DL.Hindi.ESubs'), so truncate.
     year = None
     m = re.search(r"\((19\d{2}|20\d{2})\)", s)
     if m:
@@ -2111,10 +2112,9 @@ def infer_movie_name_year_from_path(p: Path) -> Tuple[str, Optional[str]]:
         before = s[:m.start()].strip()
         s = before if before else s.replace(m.group(0), " ")
     else:
-        # Titles can END in a year ('The Film 1984', 'The Sequel 2049',
-        # '2012', '1917'), which puts TWO year tokens side by side:
-        # 'The.Film.1984.2020.1080p'. The last of an adjacent run is the
-        # release year; earlier ones belong to the title.
+        # A title can END in a year, or be nothing but a year, which puts TWO
+        # year tokens side by side: 'The.Film.1984.2020.1080p'. The last of an
+        # adjacent run is the release year; earlier ones belong to the title.
         m2 = re.search(r"\b(19\d{2}|20\d{2})(?:[\s._\-]+(19\d{2}|20\d{2}))*\b", s)
         if m2:
             year = m2.group(2) or m2.group(1)
@@ -2219,7 +2219,7 @@ def extract_imdb_id_from_tv_path(p: Path) -> Optional[str]:
     """
     Extract IMDb id for a TV file.
     Checks the filename first, then walks up parent folder names —
-    TV show folders commonly carry the IMDb id (e.g. 'Show Name (2008) - tt1234567').
+    TV show folders commonly carry the IMDb id (e.g. 'Show Name (2008) - tt0000000').
     """
     imdb = extract_imdb_id_from_path(p)
     if imdb:
@@ -3441,8 +3441,8 @@ class CoverArtFetcher:
         tmdb_tv_id: Optional[int] = None
 
         # Strip a trailing (Year) for the title search, but KEEP the year as a
-        # constraint: a bare 'Show Name' search ranks by popularity and returns
-        # 'The Old Show Name' (1998) instead of the 2026 series.
+        # constraint: a bare one-word search ranks by popularity and can return
+        # a same-named show from a different decade.
         search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
         ym = re.search(r"\((\d{4})\)", show_name or "")
         show_year = ym.group(1) if ym else None
@@ -3720,9 +3720,9 @@ class MetadataFetcher:
         cache_key = f"show:{(imdb_id or show_name or '').lower()}"
 
         def fetch() -> Optional[Dict[str, Any]]:
-            # Keep the year as a constraint: a bare 'Show Name' search ranks by
-            # popularity and returns 'The Old Show Name' (1998), whose tags
-            # would then be embedded into a 2026 Bengali series.
+            # Keep the year as a constraint: a bare one-word search ranks by
+            # popularity and can return a same-named show from another
+            # decade, whose tags would then be embedded into this file.
             search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
             ym = re.search(r"\((\d{4})\)", show_name or "")
             show_year = ym.group(1) if ym else None

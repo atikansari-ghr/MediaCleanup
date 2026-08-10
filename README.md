@@ -136,8 +136,8 @@ Every mode supports `--dry-run` to preview and `--filter`/`--input` to scope the
 ## Output naming
 
 ```
-Movies:  The Film (2021) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + English + Telugu].mkv
-TV:      Show Name (2008) - S01E01 - Pilot - 1080p.x265 - [English].mkv
+Movies:  Night of the Living Dead (1968) - tt0063350 - WEB-DL.1080p.x264 - [Hindi + English].mkv
+TV:      Show Name (2019) - S01E01 - Episode Title - 1080p.x265 - [English].mkv
 ```
 
 ## Safety model

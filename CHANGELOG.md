@@ -17,20 +17,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 ## [1.5.1] — 2026-08-10
 
 ### Fixed
-- **Films whose title contains a year were mis-parsed** — `The.Film.1984.2020.1080p...` read 1984 as the release year and truncated the title to `The Film`. The resulting year filter then excluded the correct match: FileBot found `The Film 1984 (2020)` and threw it away. The last token of an adjacent year run is now the release year, keeping earlier ones in the title. Also fixes `The.Sequel.2049.2017`, and `2012.2009` / `1917.2019`, whose titles previously became the year itself.
-- **Title-with-year retry** — when a filename carries no release year (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, verified against TMDB first (the film found must carry the year in its own title) and pinned to that film's real year. Without the verification an unconstrained search answers `The Film (2017)`.
+- **Films whose title ends in a year were mis-parsed** — a name like `The.Film.1984.2020.1080p...` carries two year tokens; the first was read as the release year, truncating the title. The year filter built from it then excluded the correct match, which FileBot had already found. The last token of an adjacent year run is now the release year, keeping earlier ones in the title. Also fixes titles that are *entirely* a year, which previously lost their name altogether.
+- **Title-with-year retry** — when a filename carries no release year (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, verified against TMDB first (the film found must carry the year in its own title) and pinned to that film's real year. Without the verification an unconstrained search returns a different film in the same series.
 - **Release tags mistaken for a domain** — `The.Film.Name.2025.1080p.WEB-DL.Hindi.TV-DL.Chinese...` matched `...Hindi.TV` as a site domain (`tv` is a TLD, and the following `-` passed the guard), leaving the title as `DL Chinese`. Domain detection is now limited to three labels and rejects a TLD followed by a hyphen.
 
 ## [1.5.0] — 2026-08-07
 
 ### Added
-- **Dry-run shows the real final filename.** Previews reported the intermediate remux target, omitting everything the database rename adds — `Another Film (2026) - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv` where a real run produces `Another Film (2026) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv`. `--dry-run` now resolves the canonical title and IMDB id (cached TMDB call) and reports the predicted final name in the log and the summary table, for the skip-remux path as well.
+- **Dry-run shows the real final filename.** Previews reported the intermediate remux target, omitting everything the database rename adds — `Night of the Living Dead (1968) - WEB-DL.1080p.x264 - [Hindi + English].mkv` where a real run produces `Night of the Living Dead (1968) - tt0063350 - WEB-DL.1080p.x264 - [Hindi + English].mkv`. `--dry-run` now resolves the canonical title and IMDB id (cached TMDB call) and reports the predicted final name in the log and the summary table, for the skip-remux path as well.
 - **`--preview-exact`** — with `--dry-run`, asks FileBot itself for each name instead of predicting it. Authoritative but launches a JVM per item (~4 s vs ~1 s); both modes produced identical names in testing.
 
 ## [1.4.2] — 2026-08-06
 
 ### Fixed
-- **Wrong show's metadata and poster embedded into TV episodes** — the tag and cover art paths searched TMDB by show name with the year deliberately dropped, so `Show Name (2026)` resolved to **The Old Show Name (1998)** (TMDB's most popular `Show Name` match) and embedded its genre, network, cast, episode titles and poster. Both paths are now year-constrained via `resolve_tv_series_tmdb_id()`; when no series matches the year, nothing is written rather than another show's data.
+- **Wrong show's metadata and poster embedded into TV episodes** — the tag and cover art paths searched TMDB by show name with the year deliberately dropped, so a 2026 series resolved to a same-named 1998 sitcom (TMDB's most popular match for that name) and embedded its genre, network, cast, episode titles and poster. Both paths are now year-constrained via `resolve_tv_series_tmdb_id()`; when no series matches the year, nothing is written rather than another show's data.
 
 ### Added
 - **`--clear`** — removal modifier for the standalone modes. `--cleantags --clear` wipes all tags, the segment title and every track name, writing nothing back (fully offline, no database lookups, no rename). `--coverart --clear` deletes embedded cover art and removes the file's ledger row so a later run re-fetches it. Both honor `--dry-run`, `--filter` and `--input`.
@@ -38,7 +38,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 ## [1.4.1] — 2026-08-06
 
 ### Fixed
-- **TV episodes matched to the wrong same-named show** — `Show Name (2026) - S01E01 - An Episode Title` was renamed to `Show Name (2024) (2024) - S01E01 - Another Show Name`. There are four series called *Show Name*; the Bengali 2026 one has no TheTVDB entry at all (`tvdb=None`), so FileBot's fuzzy search silently substituted a different one. TV lookups are now year-constrained, and when TheTVDB has no matching series the show is resolved on TMDB and FileBot is pinned to that exact series id.
+- **TV episodes matched to the wrong same-named show** — a 2026 regional series was renamed into a same-named 2024 documentary, complete with a doubled year. Four series shared that name, and the one being processed had no TheTVDB entry at all (`tvdb=None`), so FileBot's fuzzy search silently substituted another. TV lookups are now year-constrained, and when TheTVDB has no matching series the show is resolved on TMDB and FileBot is pinned to that exact series id.
 - **Doubled year in TV names** (`Show Name (2024) (2024)`) — TheTVDB disambiguates same-named series by embedding the year in the series name; the format now strips a trailing `(YYYY)` from the show name before appending the year. Applies to episode filenames and `--rename-into` folders.
 
 ## [1.4.0] — 2026-08-05
@@ -47,20 +47,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - **Variant releases were not being merged** — grouping compared raw filenames, so `The Film 2025 Hindi DD5.1-224Kbps + Kannada Dual Audio HD 1080p ESub.mkv` and `The.Film.2025.WEB-DL.720p.Multi.Audio.ESub.mkv` scored 0.382 similarity (threshold 0.88) and were processed as two separate files instead of one merged release. Grouping now compares the **inferred title + year**, which both files resolve to identically.
 
 ### Added
-- **Identity-based grouping** — releases whose titles differ too much to match (`The Film` vs `The Film Extended Title`) are merged when they resolve to the same IMDB/TMDB id. Free signals first (id in filename, folder, or MKV tags), database lookup only for folders with more than one candidate, results cached in `logs/movie_identity.csv`.
+- **Identity-based grouping** — releases whose titles differ too much to match (a main title alone vs the same title with its subtitle) are merged when they resolve to the same IMDB/TMDB id. Free signals first (id in filename, folder, or MKV tags), database lookup only for folders with more than one candidate, results cached in `logs/movie_identity.csv`.
 - **Runtime guard** — a merge candidate is split into same-duration cohorts before merging (±1%). Combining releases of different length (alternate cut, extra logos, PAL speed-up) would desync the added audio for the whole film; those files are now processed separately with a clear warning.
 
 ## [1.3.2] — 2026-07-29
 
 ### Fixed
-- **Wrong-year matches** — `SiteName.Foo.The Film.2026...` was renamed to `The Film (1984)`. Movie lookups are now constrained to the filename year (±1 for release-date drift), so a same-title film from another year can never be matched. When nothing matches under the constraint the file is reported FAILED instead of silently renamed to a wrong guess. TV is never year-constrained.
+- **Wrong-year matches** — a 2026 film was renamed as a same-titled film from 1984. Movie lookups are now constrained to the filename year (±1 for release-date drift), so a same-title film from another year can never be matched. When nothing matches under the constraint the file is reported FAILED instead of silently renamed to a wrong guess. TV is never year-constrained.
 - **Distributor prefixes without a valid TLD** — names stamped onto filenames with no domain suffix (`SiteName.Foo.The.Film.2024...`) are now stripped from movie and TV name inference, from a user-supplied list (longest-match-first, chained, with an over-strip guard so `SiteName.Up.2009` still yields `Up`).
 
 ## [1.3.1] — 2026-07-24
 
 ### Fixed
-- **Release-site prefixes broke identification** — filenames like `www.example-site.net_-_Metropolis_1927_...` produced the lookup query `www example-site net - Metropolis (1927)`, which no database could match. Leading `www.*`, `domain.tld`, and `[www.site.com]` prefixes are now stripped from movie *and* TV name inference. Legitimate dotted titles (`Dotted.Title.One`, `Dotted.Title.Two`) are explicitly protected.
-- **FileBot query fallback** — when a lookup using our inferred title finds no match, FileBot is now retried once without `--query`, letting its own release-name parser identify the file (e.g. `GroupName.Extra.Another Film.2014...` → `Another Film (2014) - tt1234567`).
+- **Release-site prefixes broke identification** — filenames like `www.example-site.net_-_The.Film_1927_...` produced the lookup query `www example-site net - The Film (1927)`, which no database could match. Leading `www.*`, `domain.tld`, and `[www.site.com]` prefixes are now stripped from movie *and* TV name inference. Legitimate dotted titles whose second token happens to be a valid TLD (`in`, `to`, `me`, …) are explicitly protected.
+- **FileBot query fallback** — when a lookup using our inferred title finds no match, FileBot is now retried once without `--query`, letting its own release-name parser identify the file (e.g. `GroupName.Extra.The.Film.2014...` → the correct `The Film (2014) - tt…`).
 
 ## [1.3.0] — 2026-07-09
 

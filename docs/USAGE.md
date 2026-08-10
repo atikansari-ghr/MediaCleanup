@@ -103,7 +103,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 `--dry-run` reports, for every file, the name it would end up with **after** the database rename — not the intermediate remux target:
 
 ```
-[DRY] Final name would be: Another Film (2026) - tt1234567 - WEB-DL.1080p.x265 - [Hindi + Telugu].mkv
+[DRY] Final name would be: Night of the Living Dead (1968) - tt0063350 - WEB-DL.1080p.x264 - [Hindi + English].mkv
 ```
 
 The prediction resolves the canonical title and IMDB id through TMDB (cached, one cheap call per title); resolution, codec, source tag and languages are computed from the files themselves. It covers the skip-remux path too, so files that are only renamed also show their new name.
@@ -111,7 +111,7 @@ The prediction resolves the canonical title and IMDB id through TMDB (cached, on
 `--preview-exact` instead asks FileBot for each name — the same tool that performs the real rename. It is authoritative but launches a JVM per item (roughly 4 s vs 1 s in testing), so it suits spot-checking a few titles rather than sweeping a library:
 
 ```bat
-python MediaCleanup.py --dry-run --movies --filter "Another Film*" --preview-exact
+python MediaCleanup.py --dry-run --movies --filter "Night*" --preview-exact
 ```
 
 Either way a preview is an estimate: the database is consulted again at run time. `--no-fetch-tags` disables prediction and falls back to the heuristic name.
@@ -128,7 +128,7 @@ targets = ["hin", "eng", "tel"]     # the default — Hindi, English, Telugu
 - **List order = audio track order** in the output file (and the `[...]` filename bracket).
 - Accepts **every form**: ISO 639-1 (`"ko"`), ISO 639-2 bibliographic (`"kor"`) *and* terminological (`"fra"`), full English names (`"Korean"`), and common alternates (Farsi, Punjabi, Bangla…). The complete ISO 639 registry is built in (189 languages); BCP-47 track tags like `zh-Hans` are understood too.
 - Detection, display names, subtitle keeping, and cover art poster-language preference all follow the configured targets automatically.
-- **Video track language**: encoders usually leave it `und`; during tag cleaning the script sets it to the title's original language from TMDB (The Film → `eng`, RRR → `tel`). Override per run with `--force-video-lang`.
+- **Video track language**: encoders usually leave it `und`; during tag cleaning the script sets it to the title's original language from TMDB. Override per run with `--force-video-lang`.
 
 ## Cover art
 
@@ -156,7 +156,7 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 python MediaCleanup.py --coverart
 
 :: One show only
-python MediaCleanup.py --coverart --tv --input "D:\Media\TV\Show Name (2008)"
+python MediaCleanup.py --coverart --tv --input "D:\Media\TV\Show Name (2019)"
 
 :: Replace existing covers in a folder
 python MediaCleanup.py --coverart --movies --input "D:\Media\Fixed" --coverart-overwrite
@@ -180,8 +180,8 @@ Whenever tag cleaning runs — the automatic pass after each remux **and** stand
 **Segment title** (the "main title" players display) stays clean — no technical suffixes:
 
 ```
-Movies: The Film (2021)
-TV:     Show Name (2006) - S01E23 - An Episode Title
+Movies: Night of the Living Dead (1968)
+TV:     Show Name (2019) - S01E23 - Episode Title
 ```
 
 A full season costs one show lookup + one season lookup total (cached per run), regardless of episode count.
@@ -230,7 +230,7 @@ Details: requires exactly one of `--movies`/`--tv` (different databases + format
 
 `--subtitles` downloads missing subtitles from OpenSubtitles.com as **sidecar `.srt` files** — no remux, media streams untouched. Requires `api_key`, `username`, and `password` in the `[subtitles]` TOML section (free account ≈ 20 downloads/day, VIP ≈ 1000/day; the log shows your remaining quota after each download and the run stops gracefully when it's exhausted).
 
-- **Naming**: single configured language → exact MKV stem + `.srt` (`The Film (2021) - tt1234567 - ... - [Hindi + English + Telugu].srt`). Extra languages get a suffix: `.hin.srt`, `.tel.srt`.
+- **Naming**: single configured language → exact MKV stem + `.srt` (`Night of the Living Dead (1968) - tt0063350 - ... - [Hindi + English].srt`). Extra languages get a suffix: `.hin.srt`, `.tel.srt`.
 - **Languages**: `[subtitles] languages = ["en"]` (ISO 639-1; English is the default).
 - **Skips** files already covered — embedded subtitle track in the wanted language OR an existing sidecar.
 - **Matching**: file hash (identifies the exact release — best sync) + IMDB ID, ranked by hash-match → trusted uploader → download count.
@@ -240,7 +240,7 @@ Details: requires exactly one of `--movies`/`--tv` (different databases + format
 python MediaCleanup.py --subtitles --dry-run
 
 :: Download for one show
-python MediaCleanup.py --subtitles --tv --input "D:\Media\TV\Show Name (2006)"
+python MediaCleanup.py --subtitles --tv --input "D:\Media\TV\Show Name (2019)"
 
 :: Whole library
 python MediaCleanup.py --subtitles
@@ -319,25 +319,25 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
 **Wrong metadata or poster embedded (from a different show)**
-TV series lookups are year-constrained: `Show Name (2026)` no longer resolves to *The Old Show Name* (1998), which TMDB ranks first for a bare `Show Name` search. When no series matches the year, the script now embeds **nothing** rather than another show's data. To repair files tagged before this fix:
+TV series lookups are year-constrained, so a series no longer resolves to a same-named show from another year — which is what TMDB returns first when several share a name. When no series matches the year, the script now embeds **nothing** rather than another show's data. To repair files tagged before this fix:
 
 ```bat
-python MediaCleanup.py --cleantags --tv --filter "Show Name*"                        :: re-tag correctly
-python MediaCleanup.py --coverart --tv --filter "Show Name*" --coverart-overwrite    :: re-fetch the poster
+python MediaCleanup.py --cleantags --tv --filter "Show Name*"                     :: re-tag correctly
+python MediaCleanup.py --coverart --tv --filter "Show Name*" --coverart-overwrite :: re-fetch the poster
 ```
 
 To strip a file bare instead, use `--clear`:
 
 ```bat
-python MediaCleanup.py --cleantags --clear --tv --filter "Show Name*"   :: remove all tags/title/track names
-python MediaCleanup.py --coverart  --clear --tv --filter "Show Name*"   :: remove the embedded cover
+python MediaCleanup.py --cleantags --clear --tv --filter "Show Name*"  :: remove all tags/title/track names
+python MediaCleanup.py --coverart  --clear --tv --filter "Show Name*"  :: remove the embedded cover
 ```
 
 **A TV episode is renamed to a different show with the same name**
-Shouldn't happen any more. TV lookups are constrained to the series year from the folder/filename, and if TheTVDB has no matching series the script resolves it on TMDB and pins FileBot to that exact series id. This matters for regional shows: the Bengali *Show Name* (2026) has no TheTVDB entry at all, so FileBot used to silently substitute the English *Show Name* (2024). Make sure the show folder or filename carries the right year — that year is the constraint.
+Shouldn't happen any more. TV lookups are constrained to the series year from the folder/filename, and if TheTVDB has no matching series the script resolves it on TMDB and pins FileBot to that exact series id. This matters for regional shows, which often have no TheTVDB entry at all — FileBot used to silently substitute a same-named series instead. Make sure the show folder or filename carries the right year — that year is the constraint.
 
-**A film whose title contains a year (The Film 1984, The Sequel 2049, 1917, 2012)**
-Handled. Such releases carry two year tokens — `The.Film.1984.2020.1080p...` — and the last one is taken as the release year, keeping the earlier one in the title. When the filename has no release year at all (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, but only after checking against the database that a film by that name really exists — so `The Film 1984` resolves to the 2020 film rather than the 2017 one.
+**A film whose title contains or ends in a year**
+Handled. Such releases carry two year tokens — `The.Film.1984.2020.1080p...` — and the last one is taken as the release year, keeping the earlier one in the title. When the filename has no release year at all (`The.Film.1984.1080p...`), the parsed year is retried as part of the title, but only after checking against the database that a film by that name really exists — so it resolves to the right entry rather than another film in the same series.
 
 **A movie is renamed to the wrong year (e.g. a 2026 film matched to a 1984 remake)**
 Shouldn't happen any more: movie lookups are constrained to the year in the filename (±1 for release-date drift), so a same-title film from another year can never win. If the correct title genuinely can't be found under that year, the file is reported **FAILED** rather than renamed to a wrong guess — check the summary table.
