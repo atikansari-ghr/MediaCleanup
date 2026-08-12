@@ -166,6 +166,16 @@ Metadata and artwork come from third-party services, used under their respective
 MKVToolNix, FileBot, Plex and Jellyfin are trademarks of their respective owners;
 this project is an independent tool that works alongside them.
 
+## Support
+
+If this project saved you time, you can support its development:
+
+[![Support on Ko-fi](https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/atikansari)
+
+## Author
+
+**Atik Ansari** — [github.com/atikansari-ghr](https://github.com/atikansari-ghr)
+
 ## License
 
 [MIT](LICENSE) — free to use, modify, and share.

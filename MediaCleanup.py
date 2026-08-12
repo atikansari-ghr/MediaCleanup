@@ -2,20 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-MediaCleanup.py (Enhanced)
-Production-grade Windows 11 Python 3.11 media cleanup/merge tool using MKVToolNix.
+MediaCleanup.py — organise a personal MKV media library, built on MKVToolNix.
+Author:  Atik Ansari — https://github.com/atikansari-ghr
+Project: https://github.com/atikansari-ghr/MediaCleanup
+License: MIT
 
-ENHANCEMENT: When two similar MKV files are found in movie directory with different audio tracks:
-- Select the best x265/HEVC video track from either file
-- Collect ALL Hindi, Telugu, and English audio tracks from BOTH files
-- Select the best English subtitle
-- Merge into a single optimized MKV file
+Merges variant copies of the same title (best video track plus every audio
+track in the configured languages), strips promotional tags and attachments,
+embeds full metadata and cover art, downloads sidecar subtitles, and renames
+everything to one canonical format.
 
 Key guarantees:
-- Never modifies source files in place.
-- Uses a safe working mirror for required inputs.
-- Uses mkvmerge -J JSON identification for track decisions.
-- Writes output to temp file then atomically moves into destination.
+- Sources are only ever READ. Output is written to a temp file and atomically
+  moved into place; --inplace replaces a source only after verifying the
+  output's track counts and duration.
+- mkvmerge -J JSON identification drives every track decision.
+- --dry-run previews every action, including the predicted final filename.
 """
 
 from __future__ import annotations
