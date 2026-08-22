@@ -3,6 +3,11 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] — 2026-08-22
+
+### Fixed
+- **Another film's metadata, poster and IMDB id attached to movies whose title is a substring of a more popular one.** TMDB's `year` search parameter only re-ranks results, it does not filter them — a search for `The Film` with `year=2026` still returns the far more popular `Franchise: The Film` (2017) first, and the code took `results[0]` without checking. The FileBot rename was protected by its hard year filter, but the metadata, cover art, dry-run prediction and identity-grouping paths were not. Movie and series searches now require a result whose release year actually matches (exact, then ±1 for release-date drift), and return nothing when a year is known and none matches.
+
 ## [1.6.0] — 2026-08-10
 
 ### Changed

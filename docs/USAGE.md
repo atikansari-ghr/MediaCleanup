@@ -318,8 +318,8 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
-**Wrong metadata or poster embedded (from a different show)**
-TV series lookups are year-constrained, so a series no longer resolves to a same-named show from another year — which is what TMDB returns first when several share a name. When no series matches the year, the script now embeds **nothing** rather than another show's data. To repair files tagged before this fix:
+**Wrong metadata or poster embedded (from a different title)**
+Lookups are year-verified for films and series alike, so a title no longer resolves to a better-known one that merely contains the same words — a search for a 2026 film is not satisfied by a more popular film from 2017 with a longer name. A series likewise no longer resolves to a same-named show from another year — which is what TMDB returns first when several share a name. When no series matches the year, the script now embeds **nothing** rather than another show's data. To repair files tagged before this fix:
 
 ```bat
 python MediaCleanup.py --cleantags --tv --filter "Show Name*"                     :: re-tag correctly

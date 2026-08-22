@@ -1011,6 +1011,51 @@ _TV_SERIES_ID_CACHE: Dict[str, Optional[int]] = {}
 _TV_SERIES_ID_LOCK = threading.Lock()
 
 
+def _tmdb_search_best(title: str, year: Optional[str], is_tv: bool) -> Optional[int]:
+    """
+    Search TMDB and return the best id, VERIFYING the year when one is known.
+
+    TMDB's `year` parameter only re-ranks results, it does not filter them: a
+    search for 'The Film' with year=2026 still returns the more
+    popular 'Franchise: The Film' (2017) first. Taking results[0]
+    blindly would attach that film's metadata, poster and IMDB id to an
+    unrelated file, so a result whose release year actually matches is
+    required — exact first, then ±1 for release-date drift. When a year is
+    known and nothing matches it, nothing is returned: another title's data is
+    worse than none.
+    """
+    kind = "tv" if is_tv else "movie"
+    date_key = "first_air_date" if is_tv else "release_date"
+    url = (f"https://api.themoviedb.org/3/search/{kind}"
+           f"?api_key={CFG.TMDB_API_KEY}&query={urllib.parse.quote(title)}")
+    if year:
+        url += f"&first_air_date_year={year}" if is_tv else f"&year={year}"
+
+    results = (_http_get_json(url) or {}).get("results") or []
+    if not results:
+        return None
+    if not year:
+        return results[0].get("id")
+    try:
+        want = int(year)
+    except (TypeError, ValueError):
+        return results[0].get("id")
+
+    for tolerance in (0, 1):
+        for r in results:
+            ry = str(r.get(date_key) or "")[:4]
+            if ry.isdigit() and abs(int(ry) - want) <= tolerance and r.get("id"):
+                if r is not results[0]:
+                    logging.debug("TMDB %s %r (%s): skipped better-ranked %r (%s)",
+                                  kind, title, year, results[0].get("title") or results[0].get("name"),
+                                  str(results[0].get(date_key) or "")[:4])
+                return int(r["id"])
+
+    logging.info("No TMDB %s titled %r from %s — using nothing rather than a different title.",
+                 kind, title, year)
+    return None
+
+
 def resolve_tv_series_tmdb_id(show: str, year: Optional[str]) -> Optional[int]:
     """
     Resolve a TV series to its TMDB id by name + first-air year.
@@ -3303,14 +3348,7 @@ class CoverArtFetcher:
                 shows[0].get("id") if shows else None)
 
     def _tmdb_search(self, title: str, year: Optional[str], is_tv: bool) -> Optional[int]:
-        kind = "tv" if is_tv else "movie"
-        url = (f"https://api.themoviedb.org/3/search/{kind}"
-               f"?api_key={CFG.TMDB_API_KEY}&query={urllib.parse.quote(title)}")
-        if year and not is_tv:
-            url += f"&year={year}"
-        data = _http_get_json(url)
-        results = (data or {}).get("results") or []
-        return results[0].get("id") if results else None
+        return _tmdb_search_best(title, year, is_tv)
 
     def _tmdb_pick_poster_url(self, tmdb_id: int, is_tv: bool, lang_pref: List[str]) -> Optional[str]:
         """Pick the best poster by language preference, then TMDB vote score."""
@@ -3627,14 +3665,7 @@ class MetadataFetcher:
                 shows[0].get("id") if shows else None)
 
     def _tmdb_search_id(self, title: str, year: Optional[str], is_tv: bool) -> Optional[int]:
-        kind = "tv" if is_tv else "movie"
-        url = (f"https://api.themoviedb.org/3/search/{kind}"
-               f"?api_key={CFG.TMDB_API_KEY}&query={urllib.parse.quote(title)}")
-        if year and not is_tv:
-            url += f"&year={year}"
-        data = _http_get_json(url)
-        results = (data or {}).get("results") or []
-        return results[0].get("id") if results else None
+        return _tmdb_search_best(title, year, is_tv)
 
     @staticmethod
     def _top_cast(credits: Dict[str, Any], limit: int = 10) -> List[Tuple[str, str]]:
