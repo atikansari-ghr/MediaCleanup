@@ -1455,6 +1455,22 @@ def _filebot_series_name_filter(year_filter: List[str], show: str, db: str) -> L
     return ["--filter", name_expr]
 
 
+def _filebot_skipped_as_already_correct(out_txt: str) -> bool:
+    """
+    True when FileBot's only "failure" was that the file already carries the
+    name it would be renamed to.
+
+    FileBot reports `[MOVE] Skipped [X] because [X] already exists` and exits
+    non-zero, which is indistinguishable from a real failure by return code —
+    but source and destination being the same path means the work was already
+    done, not that it could not be done.
+    """
+    m = re.search(r"Skipped \[(.+)\] because \[(.+)\] already exists", out_txt or "")
+    if not m:
+        return False
+    return os.path.normcase(m.group(1).strip()) == os.path.normcase(m.group(2).strip())
+
+
 def _filebot_failure_reason(out_txt: str, err_txt: str, rc: Optional[int], db: str) -> str:
     """Condense FileBot's output into one line fit for the summary table."""
     blob = "\n".join((out_txt or "", err_txt or ""))
@@ -1517,6 +1533,7 @@ def run_filebot_rename_final_mkv(
         before_size = None
 
     # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths.
+    filebot_format = _pin_resolution_in_format(filebot_format, mkv)
     base_cmd = [
         str(CFG.FILEBOT_EXE),
         "-rename", str(mkv),
@@ -1598,7 +1615,11 @@ def run_filebot_rename_final_mkv(
         # Disable further attempts if FileBot itself cannot run due to bundled JRE missing
         if "bundled java runtime environment" in out_txt.lower() and ("missing" in out_txt.lower() or "corrupted" in out_txt.lower()):
             _FILEBOT_DISABLED = True
-        _record(False, _filebot_failure_reason(out_txt, err_txt, r.rc, db))
+        if _filebot_skipped_as_already_correct(out_txt):
+            logging.info("Already named as the database would name it: %s", mkv.name)
+            _record(True)
+        else:
+            _record(False, _filebot_failure_reason(out_txt, err_txt, r.rc, db))
         return mkv
 
     # Log what FileBot actually did so the user can see it
@@ -2810,31 +2831,46 @@ def _nearest_by_dim(value: int, targets: Tuple[int, ...]) -> Tuple[int, int]:
     return (best_idx, best_delta)
 
 
-# Standard heights FileBot's {vf} binding reports, largest first.
-_VF_LADDER: Tuple[int, ...] = (8640, 4320, 2160, 1440, 1080, 720, 576, 480, 360, 240)
+# Standard frame heights, largest first.
+_STD_HEIGHTS: Tuple[int, ...] = (4320, 2160, 1440, 1080, 720, 576, 480, 360, 240)
+# Widths of the common masters, mapped to the height their releases are named for.
+_WIDTH_CLASS: Tuple[Tuple[int, int], ...] = (
+    (7680, 4320), (3840, 2160), (2560, 1440), (1920, 1080),
+    (1280, 720), (1024, 576), (854, 480), (640, 360),
+)
 
 
 def infer_resolution_tag_from_video(track: Track, fallback_filename: Optional[str] = None, **_ignored) -> str:
     """
-    Infer the resolution tag ('1080p') the way FileBot's {vf} binding does, so
-    the --dry-run preview matches the name a real run produces.
+    Infer the resolution tag ('1080p') a release is named for.
 
-    FileBot normalises to a **16:9-equivalent height** — max(width x 9/16,
-    height) — then takes the first standard height that value reaches within
-    10%. This is what makes an ultra-wide 2582x1080 encode '1440p' (2582 x 9/16
-    = 1452) rather than '1080p'. Bucketing by raw width instead used to report
-    1080p here while FileBot wrote 1440p, so every preview of non-16:9 content
-    disagreed with the eventual filename.
+    Height decides it whenever the frame has a standard height, within 5% so
+    coded padding still lands right (an encoder rounds 1080 up to 1088). This is
+    what keeps an ultra-wide 2582x1080 scope encode at **1080p**: it has exactly
+    1080 rows, and naming it for its 2582 width would claim vertical detail that
+    is not there.
+
+    A letterboxed frame has no standard height (1920x804), and there its width
+    says which master it came from, so the width class is used instead.
 
     Falls back to a resolution written in the filename, then 'UnknownRes'.
     """
-    w = track.width
     h = resolution_value(track)
-    effective = max((int(w) if w else 0) * 9.0 / 16.0, float(int(h) if h else 0))
-    if effective > 0:
-        for std in _VF_LADDER:
-            if effective >= std * 0.9:
-                return f"{std}p"
+    if h:
+        try:
+            h = int(h)
+            for std in _STD_HEIGHTS:
+                if std * 0.95 <= h <= std * 1.05:
+                    return f"{std}p"
+        except (TypeError, ValueError):
+            pass
+
+    w = track.width
+    if w:
+        try:
+            return f"{min(_WIDTH_CLASS, key=lambda wc: abs(wc[0] - int(w)))[1]}p"
+        except (TypeError, ValueError):
+            pass
 
     if fallback_filename:
         m = re.search(r"(?i)(4320|2160|1440|1080|720|576|480|360|240)p", fallback_filename)
@@ -2842,6 +2878,33 @@ def infer_resolution_tag_from_video(track: Track, fallback_filename: Optional[st
             return f"{m.group(1)}p"
 
     return "UnknownRes"
+
+
+def _resolution_tag_for_file(mkv: Path) -> Optional[str]:
+    """The resolution tag for a file on disk, read from its own video track."""
+    try:
+        video = next((t for t in extract_tracks(mkv, mkvmerge_identify_json(mkv))
+                      if t.type == "video"), None)
+    except Exception as e:
+        logging.debug("Could not read video track of %s: %s", mkv.name, e)
+        return None
+    return infer_resolution_tag_from_video(video, fallback_filename=mkv.name) if video else None
+
+
+def _pin_resolution_in_format(fmt: str, mkv: Path) -> str:
+    """
+    Replace FileBot's {vf} with the tag this script computed.
+
+    {vf} normalises to a 16:9-equivalent height, so FileBot would write 1440p
+    for a 2582x1080 frame while every preview and every other part of the script
+    says 1080p. Substituting a literal makes this script the single source of
+    truth for the tag, and the two can no longer disagree. If the tag cannot be
+    determined, {vf} is left in place and FileBot decides as before.
+    """
+    if "{vf}" not in fmt:
+        return fmt
+    tag = _resolution_tag_for_file(mkv)
+    return fmt.replace("{vf}", tag) if tag and tag != "UnknownRes" else fmt
 
 
 _SOURCE_TAGS = [
@@ -4272,9 +4335,10 @@ class MetadataFetcher:
             # Keep the year as a constraint: a bare one-word search ranks by
             # popularity and can return a same-named show from another
             # decade, whose tags would then be embedded into this file.
-            search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
-            ym = re.search(r"\((\d{4})\)", show_name or "")
-            show_year = ym.group(1) if ym else None
+            # Handles 'Show (2026)' and bare 'Show 2026' alike — parsing only the
+            # parenthesised form left the search unconstrained, which is how a
+            # 'Show Name 2026' episode was previewed as 'Show Name Extended'.
+            search_name, show_year = split_show_year(show_name or "")
 
             tv_id: Optional[int] = None
             if imdb_id:
@@ -4288,7 +4352,13 @@ class MetadataFetcher:
                         logging.info("No TMDB series %r (%s) — skipping metadata rather than "
                                      "tagging with a different show.", search_name, show_year)
                 else:
-                    tv_id = self._tmdb_search_id(search_name, None, is_tv=True)
+                    # No year: only an exact, unambiguous title match is safe —
+                    # ranking alone answers 'Show Name' with 'Show Name Extended'.
+                    by_name = resolve_tv_series_by_name(search_name)
+                    tv_id = by_name[0] if by_name else None
+                    if tv_id is None:
+                        logging.info("Cannot pin %r to one series without a year — skipping "
+                                     "metadata rather than using another show's.", search_name)
             if tv_id is None:
                 return None
 
@@ -4938,6 +5008,7 @@ def process_rename_one(
         except Exception:
             before_size = None
 
+        fmt = _pin_resolution_in_format(fmt, mkv)
         # Plain str() paths — FileBot's launcher breaks on \\?\-prefixed paths
         # ("bundled JRE missing or corrupted" error).
         cmd = [
@@ -5622,6 +5693,7 @@ def _filebot_preview_name(sample: Path, db: str, fmt: str, query: Optional[str],
     """
     if not CFG.FILEBOT_EXE.exists() or _FILEBOT_DISABLED or not sample.exists():
         return None
+    fmt = _pin_resolution_in_format(fmt, sample)
     cmd = [str(CFG.FILEBOT_EXE), "-rename", str(sample),
            "--db", db, "--format", fmt, "--output", str(sample.parent),
            "--action", "test", "--conflict", "skip", "-non-strict"]
@@ -5667,9 +5739,8 @@ def predict_tv_final_name(sample: Path, show: str, season_str: Optional[str], ep
                           ep_title: Optional[str], res_tag: str, codec_tag: str,
                           langs: List[str], exact: bool) -> Optional[str]:
     """Best estimate of the episode filename a real run would produce, for --dry-run."""
-    search = re.sub(r"\s*\(\d{4}\)\s*$", "", show or "").strip() or None
-    ym = re.search(r"\((\d{4})\)", show or "")
-    show_year = ym.group(1) if ym else None
+    bare, show_year = split_show_year(show or "")
+    search = bare or None
 
     if exact:
         name = _filebot_preview_name(sample, "TheTVDB", TV_FILEBOT_FORMAT, search, show_year, langs)

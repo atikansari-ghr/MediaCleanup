@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] — 2026-08-22
+
+### Fixed
+- **Files that were already correctly named were reported as not renamed.** FileBot answers `Skipped [X] because [X] already exists` and exits non-zero when a file already carries the name it would be given — indistinguishable from a real failure by return code. Such files were flagged `PARTIAL`. Source and destination being the same path is now recognised as work already done.
+- **The bare-year blind spot reached the metadata and preview paths too.** `_show_metadata` and `predict_tv_final_name` also parsed only a parenthesised `(2026)`, so a `Show Name 2026` episode was previewed and tagged as `Show Name Extended` even after the rename itself was fixed. Both now use `split_show_year`. Where no year can be established at all, the series is resolved only by an exact, unambiguous title match; otherwise metadata is skipped rather than taken from another show.
+
 ## [1.7.2] — 2026-08-22
 
 ### Fixed
@@ -13,7 +19,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Fixed
 - **Dry-run previews disagreed with what a real run produced.** Three separate causes, all now closed:
-  - **Resolution tag.** The preview bucketed by raw pixel width while FileBot's `{vf}` normalises to a 16:9-equivalent height, so an ultra-wide 2582x1080 encode previewed as `1080p` and was renamed `1440p`. The preview now uses FileBot's formula — `max(width x 9/16, height)` against the standard heights within 10% — and reproduces the tag FileBot writes on every file tested.
+  - **Resolution tag.** The preview bucketed by raw pixel width while FileBot's `{vf}` normalises to a 16:9-equivalent height, so an ultra-wide 2582x1080 encode previewed as `1080p` and was renamed `1440p`. This script now owns the tag outright: it is computed once from the file's own video track and substituted into FileBot's format string in place of `{vf}`, so the preview and the rename cannot disagree. A frame is named for its **height** when that height is standard (within 5%, which absorbs coded padding — an encoder stores 1080 rows as 1088), and for its width class only when the height is non-standard because the frame is letterboxed. A 2582x1080 scope encode is therefore `1080p`: it has exactly 1080 rows, and naming it `1440p` would claim vertical detail it does not have.
   - **Series with no year in the filename were never rescued.** When TheTVDB cannot identify a show, the code falls back to pinning FileBot to the TMDB series id — but that fallback was gated on a year parsed from the filename, so it only fired for files an earlier run had already canonicalised. Releases still carrying their original names, which is exactly when the rescue is needed, dropped to a weaker retry and failed. A show can now also be resolved by name alone (`resolve_tv_series_by_name`), accepted only on an exact title match and only when a single series matches — two same-named series with no year to separate them is reported, not guessed.
   - **Failed renames were reported `OK`.** A rename failure returned the original path, indistinguishable from "no rename needed", so a run could report `OK: 16 | Failed: 0` while eight files silently kept their release names. Renames now report their outcome; such tasks show as **PARTIAL** with the reason (`not renamed: TheTVDB entry is broken (id 000000)`) and are listed after the summary.
 

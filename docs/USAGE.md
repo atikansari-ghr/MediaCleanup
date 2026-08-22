@@ -115,7 +115,7 @@ The prediction resolves the canonical title and IMDB id through TMDB (cached, on
 python MediaCleanup.py --dry-run --movies --filter "Night*" --preview-exact
 ```
 
-The predicted resolution tag uses FileBot's own formula — a 16:9-equivalent height, `max(width x 9/16, height)` — so ultra-wide encodes preview the same tag they are renamed to (a 2582x1080 file is `1440p`, not `1080p`). Even so, a preview remains an estimate: the database is consulted again at run time. `--no-fetch-tags` disables prediction and falls back to the heuristic name.
+The resolution tag is computed by this script and substituted into FileBot's format, so the preview and the rename always agree on it. A frame is named for its **height** whenever that height is standard — an ultra-wide 2582x1080 scope encode is `1080p`, because it has exactly 1080 rows — and for its width class only when the height is non-standard because the frame is letterboxed (1920x804 is `1080p`, not `720p`). Coded padding is absorbed, so a 1088-row stored frame is still `1080p`. Even so, a preview remains an estimate: the database is consulted again at run time. `--no-fetch-tags` disables prediction and falls back to the heuristic name.
 
 ## Target languages
 
