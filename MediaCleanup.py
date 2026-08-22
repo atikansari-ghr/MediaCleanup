@@ -909,7 +909,11 @@ def print_results_table(title: str, results: List[Result]) -> None:
 
     for r in sorted(results, key=sort_key):
         name = r.source_items[0].name if r.source_items else "?"
-        if r.ok and r.reason in _SKIP_REASONS:
+        if r.ok and r.details.get("rename_failed"):
+            # The file was tagged and cleaned, but it still carries its release
+            # name — reporting a bare OK hid that from the summary entirely.
+            status = "[yellow]PARTIAL[/yellow]"
+        elif r.ok and r.reason in _SKIP_REASONS:
             status = "[yellow]SKIP[/yellow]"
         elif r.ok:
             status = "[green]OK[/green]"
@@ -918,6 +922,8 @@ def print_results_table(title: str, results: List[Result]) -> None:
 
         if not r.ok:
             detail = r.reason
+        elif r.details.get("rename_failed"):
+            detail = f"not renamed: {r.details['rename_failed']}"
         elif r.details.get("predicted"):
             detail = f"-> {r.details['predicted']}"
         elif r.kind == "rename" and (r.details.get("new") or r.details.get("proposed")):
@@ -1251,6 +1257,9 @@ def _tmdb_search_best(title: str, year: Optional[str], is_tv: bool) -> Optional[
     return None
 
 
+_TV_SERIES_BY_NAME_CACHE: Dict[str, Optional[Tuple[int, Optional[str]]]] = {}
+
+
 def resolve_tv_series_tmdb_id(show: str, year: Optional[str]) -> Optional[int]:
     """
     Resolve a TV series to its TMDB id by name + first-air year.
@@ -1285,6 +1294,54 @@ def resolve_tv_series_tmdb_id(show: str, year: Optional[str]) -> Optional[int]:
     return tmdb_id
 
 
+def _normalise_title(text: str) -> str:
+    """Casefold and drop punctuation so titles compare on their words alone."""
+    return re.sub(r"[^0-9a-z]+", " ", (text or "").lower()).strip()
+
+
+def resolve_tv_series_by_name(show: str) -> Optional[Tuple[int, Optional[str]]]:
+    """
+    Resolve a series on TMDB by name alone, for releases whose filenames carry
+    no year. Returns (tmdb_id, first_air_year) or None.
+
+    An unconstrained search cannot be trusted on ranking — that is how 'Show Name'
+    finds 'Show Name Extended' — so only an EXACT title match counts, and only when
+    exactly one result matches. Two same-named series with no year to separate
+    them is not something this can answer, and it says so rather than picking.
+    """
+    if not CFG.TMDB_API_KEY or not show:
+        return None
+    want = _normalise_title(show)
+    if not want:
+        return None
+    key = f"name|{want}"
+    with _TV_SERIES_ID_LOCK:
+        if key in _TV_SERIES_BY_NAME_CACHE:
+            return _TV_SERIES_BY_NAME_CACHE[key]
+
+    found: Optional[Tuple[int, Optional[str]]] = None
+    try:
+        url = (f"https://api.themoviedb.org/3/search/tv?api_key={CFG.TMDB_API_KEY}"
+               f"&query={urllib.parse.quote(show)}")
+        results = (_http_get_json(url) or {}).get("results") or []
+        exact = [r for r in results
+                 if r.get("id") and want in (_normalise_title(r.get("name")),
+                                             _normalise_title(r.get("original_name")))]
+        if len(exact) == 1:
+            air = str(exact[0].get("first_air_date") or "")[:4]
+            found = (int(exact[0]["id"]), air if air.isdigit() else None)
+            logging.debug("TMDB series resolved by name: %r -> %s (%s)", show, found[0], found[1])
+        elif len(exact) > 1:
+            logging.info("%d series are titled %r and the filename carries no year — "
+                         "not guessing between them.", len(exact), show)
+    except Exception as e:
+        logging.debug("TMDB series name lookup failed for %r: %s", show, e)
+
+    with _TV_SERIES_ID_LOCK:
+        _TV_SERIES_BY_NAME_CACHE[key] = found
+    return found
+
+
 def _filebot_tmdb_tv_cmd(base_cmd: List[str], show: str, year: Optional[str]) -> Optional[List[str]]:
     """
     Build a FileBot command pinned to an exact TMDB series id, for shows
@@ -1292,7 +1349,12 @@ def _filebot_tmdb_tv_cmd(base_cmd: List[str], show: str, year: Optional[str]) ->
     that series instead of searching by name (a --filter cannot steer the
     search, it only drops candidates the search already produced).
     """
-    tmdb_id = resolve_tv_series_tmdb_id(show, year)
+    tmdb_id = resolve_tv_series_tmdb_id(show, year) if year else None
+    if not tmdb_id and not year:
+        # No year in the filename — fall back to an exact-title match, which is
+        # the only unconstrained lookup that can be trusted.
+        by_name = resolve_tv_series_by_name(show)
+        tmdb_id = by_name[0] if by_name else None
     if not tmdb_id:
         return None
     return [("TheMovieDB::TV" if a == "TheTVDB" else a) for a in base_cmd] + ["--q", str(tmdb_id)]
@@ -1360,6 +1422,28 @@ def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = No
     return ["--filter", f"y >= {y - 1} && y <= {y + 1}"]
 
 
+def _filebot_failure_reason(out_txt: str, err_txt: str, rc: Optional[int], db: str) -> str:
+    """Condense FileBot's output into one line fit for the summary table."""
+    blob = "\n".join((out_txt or "", err_txt or ""))
+    for pattern, message in (
+        (r"(?i)Invalid Lookup: TVDB ID not found \[(\d+)\]", "{db} entry is broken (id {0})"),
+        (r"(?i)No episode data: \[(.+?)\]", "{db} has no episode data for '{0}'"),
+        (r"(?i)because \[.+?\] already exists", "target name already in use"),
+        (r"(?i)bundled java runtime environment", "FileBot's bundled Java is missing or corrupted"),
+    ):
+        m = re.search(pattern, blob)
+        if m:
+            return message.format(*m.groups(), db=db)
+    return f"{db} lookup failed (rc={rc})"
+
+
+def _with_rename_outcome(details: Dict[str, Any], outcome: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a failed rename's reason to a task's details, if one happened."""
+    if outcome.get("ok") is False:
+        details = {**details, "rename_failed": outcome.get("reason") or "rename failed"}
+    return details
+
+
 def run_filebot_rename_final_mkv(
     mkv: Path,
     *,
@@ -1367,14 +1451,22 @@ def run_filebot_rename_final_mkv(
     filebot_format: str,
     dry_run: bool,
     query: Optional[str] = None,
+    outcome: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Run FileBot rename for a SINGLE MKV, writing result into the same directory.
     Best-effort: returns original path on failure.
 
-    query: clean movie/show title passed as --query to FileBot so it doesn't try to
-           parse the (potentially noisy) release filename for the DB lookup.
+    query:   clean movie/show title passed as --query to FileBot so it doesn't try to
+             parse the (potentially noisy) release filename for the DB lookup.
+    outcome: optional dict filled in with {'ok': bool, 'reason': str}. The return
+             value alone cannot tell "renamed to the same name" from "rename
+             failed", which used to let a failed rename be reported as OK.
     """
+    def _record(ok: bool, reason: str = "") -> None:
+        if outcome is not None:
+            outcome["ok"] = ok
+            outcome["reason"] = reason
     if dry_run or not mkv or not mkv.exists():
         return mkv
     if not CFG.FILEBOT_EXE.exists():
@@ -1425,14 +1517,14 @@ def run_filebot_rename_final_mkv(
     r = run_cmd(cmd, timeout_sec=1200)
 
     if not r.ok and mkv.exists():
-        if is_tv_db and show_year:
-            # The series is not on TheTVDB (common for regional shows). Resolve
-            # it on TMDB and pin FileBot to that exact series id.
-            tmdb_cmd = _filebot_tmdb_tv_cmd(base_cmd, search_q or "", show_year)
-            if tmdb_cmd:
-                logging.info("TheTVDB has no %s (%s) — using the TMDB series entry instead: %s",
-                             search_q, show_year, mkv.name)
-                r = run_cmd(tmdb_cmd, timeout_sec=1200)
+        tmdb_cmd = (_filebot_tmdb_tv_cmd(base_cmd, search_q or "", show_year)
+                    if is_tv_db and search_q else None)
+        if tmdb_cmd:
+            # TheTVDB could not identify the series, or holds a broken entry for
+            # it. Resolve it on TMDB and pin FileBot to that exact series id.
+            logging.info("TheTVDB could not identify %s (%s) — using the TMDB series entry "
+                         "instead: %s", search_q, show_year or "no year", mkv.name)
+            r = run_cmd(tmdb_cmd, timeout_sec=1200)
         elif query:
             # The 'year' may actually be part of the title ('The Film 1984')
             # when the filename carries no release year. Try that reading before
@@ -1466,6 +1558,7 @@ def run_filebot_rename_final_mkv(
         # Disable further attempts if FileBot itself cannot run due to bundled JRE missing
         if "bundled java runtime environment" in out_txt.lower() and ("missing" in out_txt.lower() or "corrupted" in out_txt.lower()):
             _FILEBOT_DISABLED = True
+        _record(False, _filebot_failure_reason(out_txt, err_txt, r.rc, db))
         return mkv
 
     # Log what FileBot actually did so the user can see it
@@ -1478,10 +1571,12 @@ def run_filebot_rename_final_mkv(
         if before_size is not None:
             candidates = [p for p in candidates if p.exists() and p.stat().st_size == before_size]
         if candidates:
+            _record(True)
             return candidates[0]
     except Exception:
         pass
 
+    _record(True)
     return mkv
 
 def mkvmerge_identify_json(mkv_path: Path) -> Dict[str, Any]:
@@ -2675,37 +2770,34 @@ def _nearest_by_dim(value: int, targets: Tuple[int, ...]) -> Tuple[int, int]:
     return (best_idx, best_delta)
 
 
+# Standard heights FileBot's {vf} binding reports, largest first.
+_VF_LADDER: Tuple[int, ...] = (8640, 4320, 2160, 1440, 1080, 720, 576, 480, 360, 240)
+
+
 def infer_resolution_tag_from_video(track: Track, fallback_filename: Optional[str] = None, **_ignored) -> str:
     """
-    Infer resolution tag like '1080p'.
+    Infer the resolution tag ('1080p') the way FileBot's {vf} binding does, so
+    the --dry-run preview matches the name a real run produces.
 
-    Priority:
-    1) Width (primary) — matched against RES_WIDTH_TARGETS (3840/1920/1280).
-    2) Height (fallback) — matched against RES_TARGETS (2160/1080/720).
-    3) Filename pattern — looks for '1080p', '2160p', etc.
-    4) 'UnknownRes' if nothing matches.
+    FileBot normalises to a **16:9-equivalent height** — max(width x 9/16,
+    height) — then takes the first standard height that value reaches within
+    10%. This is what makes an ultra-wide 2582x1080 encode '1440p' (2582 x 9/16
+    = 1452) rather than '1080p'. Bucketing by raw width instead used to report
+    1080p here while FileBot wrote 1440p, so every preview of non-16:9 content
+    disagreed with the eventual filename.
+
+    Falls back to a resolution written in the filename, then 'UnknownRes'.
     """
-    # 1) Width — most reliable for anamorphic / non-standard encodes
     w = track.width
-    if w:
-        try:
-            idx, _d = _nearest_by_dim(int(w), CFG.RES_WIDTH_TARGETS)
-            return f"{CFG.RES_TARGETS[idx]}p"
-        except Exception:
-            pass
-
-    # 2) Height fallback
     h = resolution_value(track)
-    if h:
-        try:
-            idx, _d = _nearest_by_dim(int(h), CFG.RES_TARGETS)
-            return f"{CFG.RES_TARGETS[idx]}p"
-        except Exception:
-            return f"{int(h)}p"
+    effective = max((int(w) if w else 0) * 9.0 / 16.0, float(int(h) if h else 0))
+    if effective > 0:
+        for std in _VF_LADDER:
+            if effective >= std * 0.9:
+                return f"{std}p"
 
-    # 3) Filename fallback
     if fallback_filename:
-        m = re.search(r"(?i)\b(2160|1440|1080|720|480)p\b", fallback_filename)
+        m = re.search(r"(?i)(4320|2160|1440|1080|720|576|480|360|240)p", fallback_filename)
         if m:
             return f"{m.group(1)}p"
 
@@ -4836,15 +4928,15 @@ def process_rename_one(
             return ("[TEST]" in text or "skipped" in text.lower()) if dry_run else res.ok
 
         if not _matched(r, out_txt) and mkv.exists():
-            if is_tv and tv_year:
-                # Series absent from TheTVDB (common for regional shows):
-                # resolve it on TMDB and pin FileBot to that exact series id.
-                tmdb_cmd = _filebot_tmdb_tv_cmd(plain_cmd, query or "", tv_year)
-                if tmdb_cmd:
-                    logging.info("TheTVDB has no %s (%s) — using the TMDB series entry instead: %s",
-                                 query, tv_year, mkv.name)
-                    r = run_cmd(tmdb_cmd, timeout_sec=600)
-                    out_txt = (r.out or "").strip()
+            tmdb_cmd = (_filebot_tmdb_tv_cmd(plain_cmd, query or "", tv_year)
+                        if is_tv and query else None)
+            if tmdb_cmd:
+                # Series absent from TheTVDB, or its entry is broken: resolve it
+                # on TMDB and pin FileBot to that exact series id.
+                logging.info("TheTVDB could not identify %s (%s) — using the TMDB series entry "
+                             "instead: %s", query, tv_year or "no year", mkv.name)
+                r = run_cmd(tmdb_cmd, timeout_sec=600)
+                out_txt = (r.out or "").strip()
             elif query:
                 # The 'year' may be part of the title ('The Film 1984') when
                 # the filename carries no release year. Try that reading first —
@@ -5585,6 +5677,7 @@ def process_movie_group(
     folder after verification (backup=True keeps them as *.original.mkv).
     """
     kind = "movie_cleanup" if len(group) == 1 else "movie_merge"
+    _rename_outcome: Dict[str, Any] = {}
     try:
         # Identify tracks (reading sources directly — identification is read-only)
         metas: Dict[Path, Tuple[List[Track], int]] = {}
@@ -5691,7 +5784,8 @@ def process_movie_group(
                             logging.warning("Auto-cleantags failed (non-fatal): %s", ct.reason)
                     fb_path = run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
                                                            filebot_format=MOVIE_FILEBOT_FORMAT,
-                                                           dry_run=False, query=movie_title)
+                                                           dry_run=False, query=movie_title,
+                                                           outcome=_rename_outcome)
                     if fb_path and fb_path.exists() and fb_path != src_file:
                         out_done = fb_path
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists() and out_done.exists():
@@ -5703,7 +5797,7 @@ def process_movie_group(
                 pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_no_target_langs OK -> %s", out_done)
                 return Result(kind="movie_no_target_langs", source_items=group, output_path=out_done, ok=True,
-                              details={"reason": "no_target_languages_found", "predicted": predicted_name})
+                              details=_with_rename_outcome({"reason": "no_target_languages_found", "predicted": predicted_name}, _rename_outcome))
 
             # Rules 1,2,5,6: all audio tracks are target languages — no remux needed
             if _actual_audio_count == _total_target_audio_count:
@@ -5722,7 +5816,8 @@ def process_movie_group(
                     logging.info("FileBot identify+rename (in-place): %s", src_file.name)
                     fb_path = run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
                                                            filebot_format=MOVIE_FILEBOT_FORMAT,
-                                                           dry_run=False, query=movie_title)
+                                                           dry_run=False, query=movie_title,
+                                                           outcome=_rename_outcome)
                     if fb_path and fb_path.exists() and fb_path != src_file:
                         logging.info("FileBot renamed -> %s", fb_path.name)
                         out_done = fb_path
@@ -5736,8 +5831,8 @@ def process_movie_group(
                 pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
                 logging.info("movie_skip_remux OK -> %s", out_done)
                 return Result(kind="movie_skip_remux", source_items=group, output_path=out_done, ok=True,
-                              details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
-                                       "predicted": predicted_name})
+                              details=_with_rename_outcome({"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
+                                       "predicted": predicted_name}, _rename_outcome))
 
             # Rules 3,4: has target langs + extra languages — remux to strip extras
             logging.info("movie: file has %d audio tracks total, %d are target langs — remuxing to strip extras.",
@@ -6043,6 +6138,7 @@ def process_tv_file(
     own folder after verification (backup=True keeps it as *.original.mkv).
     """
     kind = "tv_cleanup"
+    _rename_outcome: Dict[str, Any] = {}
     try:
         fsize = src.stat().st_size if src.exists() else 0
         meta = mkvmerge_identify_json(src)
@@ -6108,7 +6204,8 @@ def process_tv_file(
                     if not ct.ok:
                         logging.warning("Auto-cleantags failed (non-fatal): %s", ct.reason)
                 fb_path = run_filebot_rename_final_mkv(src, db="TheTVDB", filebot_format=TV_FILEBOT_FORMAT,
-                                                       dry_run=False, query=show_name)
+                                                       dry_run=False, query=show_name,
+                                                       outcome=_rename_outcome)
                 if fb_path and fb_path.exists() and fb_path != src:
                     out_done = fb_path
                 if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists() and out_done.exists():
@@ -6120,7 +6217,7 @@ def process_tv_file(
             pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_no_target_langs OK -> %s", out_done)
             return Result(kind="tv_no_target_langs", source_items=[src], output_path=out_done, ok=True,
-                          details={"reason": "no_target_languages_found", "predicted": predicted_name})
+                          details=_with_rename_outcome({"reason": "no_target_languages_found", "predicted": predicted_name}, _rename_outcome))
 
         # Rules 1,2,5,6: all audio tracks in the file are already target languages — no remux needed
         _no_extra_tracks = _actual_audio_count == _total_target_audio_count
@@ -6138,7 +6235,7 @@ def process_tv_file(
                         logging.warning("Auto-cleantags (pre-FileBot) failed (non-fatal): %s", ct.reason)
                 logging.info("FileBot identify+rename (in-place): %s", src.name)
                 fb_path = run_filebot_rename_final_mkv(src, db="TheTVDB", filebot_format=TV_FILEBOT_FORMAT, dry_run=False,
-                                                       query=show_name)
+                                                       query=show_name, outcome=_rename_outcome)
                 if fb_path and fb_path.exists() and fb_path != src:
                     logging.info("FileBot renamed -> %s", fb_path.name)
                     out_done = fb_path
@@ -6153,8 +6250,8 @@ def process_tv_file(
             pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
             logging.info("tv_skip_remux OK -> %s", out_done)
             return Result(kind="tv_skip_remux", source_items=[src], output_path=out_done, ok=True,
-                          details={"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
-                                   "predicted": predicted_name})
+                          details=_with_rename_outcome({"audio_langs": selected_audio_langs, "reason": "already_has_required_tracks",
+                                   "predicted": predicted_name}, _rename_outcome))
 
         # Rules 3,4: has target langs + extra languages — remux to strip extras
         logging.info("tv: file has %d audio tracks total, %d are target langs — remuxing to strip extras.",
@@ -6852,6 +6949,14 @@ def main() -> int:
             if not r.ok:
                 srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
                 logging.info("- %s | %s | %s", r.kind, srcs, r.reason)
+
+    not_renamed = [r for r in results if r.ok and r.details.get("rename_failed")]
+    if not_renamed:
+        logging.warning("Processed but NOT renamed: %d file(s) — they keep their release names.",
+                        len(not_renamed))
+        for r in not_renamed:
+            srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
+            logging.warning("- %s | %s", srcs, r.details["rename_failed"])
 
     print_results_table("Run results", results)
     return 0 if bad == 0 else 1

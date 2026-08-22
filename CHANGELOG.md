@@ -3,6 +3,14 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — 2026-08-22
+
+### Fixed
+- **Dry-run previews disagreed with what a real run produced.** Three separate causes, all now closed:
+  - **Resolution tag.** The preview bucketed by raw pixel width while FileBot's `{vf}` normalises to a 16:9-equivalent height, so an ultra-wide 2582x1080 encode previewed as `1080p` and was renamed `1440p`. The preview now uses FileBot's formula — `max(width x 9/16, height)` against the standard heights within 10% — and reproduces the tag FileBot writes on every file tested.
+  - **Series with no year in the filename were never rescued.** When TheTVDB cannot identify a show, the code falls back to pinning FileBot to the TMDB series id — but that fallback was gated on a year parsed from the filename, so it only fired for files an earlier run had already canonicalised. Releases still carrying their original names, which is exactly when the rescue is needed, dropped to a weaker retry and failed. A show can now also be resolved by name alone (`resolve_tv_series_by_name`), accepted only on an exact title match and only when a single series matches — two same-named series with no year to separate them is reported, not guessed.
+  - **Failed renames were reported `OK`.** A rename failure returned the original path, indistinguishable from "no rename needed", so a run could report `OK: 16 | Failed: 0` while eight files silently kept their release names. Renames now report their outcome; such tasks show as **PARTIAL** with the reason (`not renamed: TheTVDB entry is broken (id 000000)`) and are listed after the summary.
+
 ## [1.7.0] — 2026-08-22
 
 ### Added
