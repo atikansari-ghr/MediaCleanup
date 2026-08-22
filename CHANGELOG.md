@@ -3,6 +3,15 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-08-22
+
+### Added
+- **Tracks tagged `und` are now identified instead of discarded.** Some releases strip the language metadata from every track; such a file looks like it contains none of your target languages and is reported `NoAudioMatch`, even when the audio is in a language you keep. A single unlabelled audio track now takes the title's TMDB original language, and unlabelled text subtitles are identified from **their own text** — writing system first (decisive for Hangul, Thai, Hebrew, Greek, the Indic scripts, kana and Han), then function-word frequency for the alphabets several languages share. On a test release carrying one `und` audio track and 42 `und` subtitle tracks, all 42 subtitle languages were identified correctly, recovering the English, Hindi, Korean, Telugu and Chinese tracks that track-order guessing would have missed. Anything that cannot be called confidently keeps its `und` tag. Off with `--no-lang-detect` or `[languages] detect_undetermined = false`.
+
+### Fixed
+- **Corrected track languages were never written into remuxed output.** The merge builder has always accepted a per-part `languages` map, but nothing populated it — so `--force-audio-lang` (and now detected languages) affected track selection and naming while the remuxed file kept the original tags. The skip-remux path was unaffected. Both pipelines now pass the resolved language for every audio and subtitle track they include.
+- **Track names for non-target languages** were written as raw ISO codes (`fre`) rather than display names (`French`), since the display map only covers configured targets.
+
 ## [1.6.1] — 2026-08-22
 
 ### Fixed

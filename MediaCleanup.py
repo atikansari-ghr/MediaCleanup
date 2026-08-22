@@ -23,6 +23,7 @@ Key guarantees:
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import dataclasses
 import datetime as _dt
@@ -39,11 +40,12 @@ import sys
 import threading
 import time
 import tomllib
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Optional dependency: 'rich' enables colored log output and end-of-run summary
 # tables. Without it the script runs identically with plain-text output.
@@ -339,6 +341,192 @@ def resolve_language(token: str) -> Optional[str]:
     return None
 
 
+# --- Language identification from subtitle text -------------------------------
+# Releases stripped of track metadata tag every track 'und'. The text of a
+# subtitle track still says what language it is, so identify it directly rather
+# than guessing from track order. Two stages: writing system first (decisive on
+# its own for most scripts), then function-word frequency for the writing
+# systems several languages share.
+
+# Subtitle codecs whose payload is readable text.
+_TEXT_SUB_CODECS: Tuple[str, ...] = (
+    "S_TEXT/UTF8", "S_TEXT/ASCII", "S_TEXT/SSA", "S_TEXT/ASS", "S_TEXT/WEBVTT",
+)
+
+# Writing systems used by exactly one language we care about.
+_SCRIPT_LANG: Dict[str, str] = {
+    "HANGUL": "kor", "THAI": "tha", "HEBREW": "heb", "GREEK": "gre",
+    "TAMIL": "tam", "TELUGU": "tel", "KANNADA": "kan", "MALAYALAM": "mal",
+    "BENGALI": "ben", "GUJARATI": "guj", "GURMUKHI": "pan", "ORIYA": "ori",
+    "SINHALA": "sin", "MYANMAR": "bur", "KHMER": "khm", "LAO": "lao",
+    "GEORGIAN": "geo", "ARMENIAN": "arm", "ETHIOPIC": "amh", "TIBETAN": "tib",
+}
+
+# Writing systems shared by several languages - decided by function words.
+_SCRIPT_GROUP: Dict[str, Tuple[str, ...]] = {
+    "LATIN": ("eng", "spa", "por", "fre", "ita", "ger", "dut", "dan", "swe",
+              "nor", "fin", "est", "lav", "lit", "pol", "cze", "slo", "slv",
+              "hun", "rum", "tur", "vie", "ind", "may", "hrv", "srp", "alb",
+              "ice", "tgl", "cat"),
+    "CYRILLIC": ("rus", "ukr", "bul", "srp", "mac", "bel"),
+    "ARABIC": ("ara", "per", "urd"),
+    "DEVANAGARI": ("hin", "mar", "nep"),
+}
+
+# High-frequency function words. Words shared by neighbouring languages are kept
+# in both lists on purpose: they contribute equally and cancel out, leaving the
+# exclusive ones (Danish 'mig/af' vs Norwegian 'meg/av') to decide.
+_STOPWORDS: Dict[str, Set[str]] = {k: set(v.split()) for k, v in {
+    "eng": "the and you that for was with have this but not are his her she him they all",
+    "spa": "que los las por con una para pero como más está esto son del muy hay cuando bien",
+    "por": "que não uma para com mais como está isso são você dos mas muito quando bem tem",
+    "cat": "que els les amb una per però com això són molt quan bé tinc també fer",
+    "fre": "que les des pour pas vous nous une avec dans est sur plus mais tout être elle",
+    "ita": "che non per una con sono più come questo quando anche solo cosa bene tutto",
+    "ger": "und der die das ist nicht ich sie mit den ein auf für wir aber was dass",
+    "dut": "het een niet dat van ik je wij maar voor met zijn ook nog wat naar",
+    "dan": "det er ikke jeg til af med har mig dig sig efter hvad hvor men også",
+    "nor": "det er ikke jeg til av med har meg deg seg etter hva hvor men også",
+    "swe": "det är inte jag och att till av med har mig dig sig efter vad var men också",
+    "ice": "það er ekki ég til að með hef mig þig sig eftir hvað hvar en líka",
+    "fin": "että on ei ja se minä sinä hän mutta kun niin vain siitä tämä ole",
+    "est": "on ei ja see ma sa ta aga kui nii ainult sellest see ole mis",
+    "lav": "ir nav un tas es tu viņš bet kad tā tikai par šis ko kā",
+    "lit": "yra nėra ir tai aš tu jis bet kai taip tik apie šis ką kaip",
+    "pol": "nie że jest to ja ty on ale kiedy tak tylko się jak co żeby",
+    "cze": "ne že je to já ty on ale když tak jen se jak co jsem jsi jsou pro",
+    "slo": "nie že je to ja ty on ale keď tak len sa ako čo som si sú pre",
+    "slv": "ne da je to jaz ti on ampak ko tako samo se kako kaj sem si so",
+    "hrv": "ne da je to ja ti on ali kad tako samo se kako što sam si su gdje",
+    "srp": "ne da je to ja ti on ali kad tako samo se kako šta sam si su gde",
+    "hun": "nem hogy van ez én te ő de amikor így csak magát hogyan mit vagyok",
+    "rum": "nu că este asta eu tu el dar când așa doar se cum ce sunt",
+    "tur": "bir bu ne için ile ama çok daha var yok gibi kadar sonra ben sen",
+    "vie": "không là của và có được người này thì cho những một với anh tôi",
+    "ind": "yang tidak dan ini itu untuk dengan dari saya kamu akan ada bisa sudah",
+    "may": "yang tidak dan ini itu untuk dengan dari saya awak akan ada boleh sudah",
+    "alb": "nuk që është kjo unë ti ai por kur kështu vetëm si çfarë jam",
+    "tgl": "ang mga sa na ng ay hindi ako ikaw siya para pero kung yung",
+    "rus": "не что это как все меня тебя очень если так его она они был",
+    "ukr": "не що це як все мене тебе дуже якщо так його вона вони був",
+    "bul": "не какво това как всичко мен теб много ако така него тя те беше",
+    "mac": "не што ова како сè мене тебе многу ако така него таа тие беше",
+    "bel": "не што гэта як усё мяне цябе вельмі калі так яго яна яны быў",
+    "ara": "في من على أن لا ما هذا هو هي إلى مع كان عن كل",
+    "per": "در از که این را با به می برای است او آن هم یک",
+    "urd": "میں سے کہ یہ کو نے ہے ہیں کیا اور پر ایک نہیں تھا",
+    "hin": "है हैं नहीं में से को का की के और यह वह हूँ था थी थे क्या मैं तुम आप हम रहा रही रहे लिए साथ बहुत",
+    "mar": "आहे नाही आहेत मध्ये ला चा ची चे आणि हे तो ती मी तू आम्ही होता होती खूप पण काय",
+    "nep": "छ छैन हुन् हो होइन मा बाट लाई यो त्यो तिमी हामी थियो गर्नु भने पनि तर धेरै के",
+}.items()}
+
+# Letters only one language of its group uses - a tiebreak for pairs whose
+# function words largely coincide. Every character here must be near-exclusive:
+# a letter common in a neighbouring language (Slovak 'ä', also ordinary in
+# Finnish, German and Estonian) drags the wrong language to the top.
+_MARKER_CHARS: Dict[str, str] = {
+    "cze": "řěů", "slo": "ľŕô", "pol": "łżźęą", "hrv": "đ", "srp": "đ",
+    "rum": "ăâșț", "hun": "őű", "tur": "ışğ", "vie": "ơư", "est": "õ",
+    "lav": "ķņģļ", "lit": "ųėį", "dan": "ø", "nor": "ø", "ice": "þð",
+    "ger": "ß", "spa": "ñ", "por": "ã", "cat": "ŀ", "alb": "ë",
+}
+
+# Minimum share of tokens that must be function words of the winning language,
+# and how far ahead of the runner-up it must be. Below either, the track keeps
+# its 'und' tag: a wrong language tag is worse than an honest unknown.
+_LANGID_MIN_SCORE = 0.02
+_LANGID_MIN_MARGIN = 0.05
+
+
+def _lang_tokens(text: str) -> List[str]:
+    """
+    Split text into words. A word character is any letter OR combining mark:
+    Python's word-character class excludes marks, which would shred Devanagari,
+    Tamil and vowelled Arabic into bare consonants and destroy the counts.
+    """
+    return "".join(
+        ch if unicodedata.category(ch)[0] in ("L", "M") else " " for ch in text
+    ).split()
+
+
+def _script_histogram(text: str) -> Dict[str, int]:
+    counts: Dict[str, int] = collections.Counter()
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        try:
+            counts[unicodedata.name(ch).split()[0]] += 1
+        except ValueError:
+            pass
+    return counts
+
+
+def _strip_subtitle_markup(text: str) -> str:
+    """Reduce a subtitle file to its spoken words."""
+    text = re.sub(r"<[^>]+>|\{[^}]*\}", " ", text)                          # HTML / ASS overrides
+    text = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", text)                       # SDH sound cues
+    text = re.sub(r"^\s*\d+\s*$", " ", text, flags=re.M)                    # cue numbers
+    text = re.sub(r"^.*-->.*$", " ", text, flags=re.M)                      # timings
+    text = re.sub(r"^Dialogue:[^,]*(?:,[^,]*){8},", " ", text, flags=re.M)  # ASS field prefix
+    return text
+
+
+def identify_text_language(text: str) -> Tuple[Optional[str], float]:
+    """
+    Identify the language of subtitle text.
+
+    Returns (canonical ISO 639-2 code, confidence 0-1), or (None, 0.0) when the
+    text is too short or two languages score too close to call.
+    """
+    text = _strip_subtitle_markup(text)
+    hist = _script_histogram(text)
+    if not hist:
+        return None, 0.0
+    total = sum(hist.values())
+
+    # Japanese mixes kana with Han; any real kana presence settles it.
+    kana = hist.get("HIRAGANA", 0) + hist.get("KATAKANA", 0)
+    if kana and kana / total > 0.02:
+        return "jpn", 1.0
+
+    script = max(hist.items(), key=lambda kv: kv[1])[0]
+    if script in ("CJK", "IDEOGRAPHIC"):
+        return "chi", 1.0
+    if script in _SCRIPT_LANG:
+        return _SCRIPT_LANG[script], 1.0
+
+    group = _SCRIPT_GROUP.get(script)
+    if not group:
+        return None, 0.0
+
+    low = text.lower()
+    words = _lang_tokens(low)
+    if len(words) < 20:
+        return None, 0.0
+    bag = collections.Counter(words)
+
+    scores: Dict[str, float] = {}
+    for lang in group:
+        stop = _STOPWORDS.get(lang)
+        if not stop:
+            continue
+        hits = sum(bag[w] for w in stop)
+        bonus = sum(low.count(ch) for ch in _MARKER_CHARS.get(lang, "")) * 3
+        scores[lang] = (hits + bonus) / len(words)
+    if not scores:
+        return None, 0.0
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best, best_score = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best_score < _LANGID_MIN_SCORE:
+        return None, 0.0
+    margin = (best_score - runner_up) / best_score
+    if margin < _LANGID_MIN_MARGIN:
+        return None, 0.0
+    return best, round(min(1.0, margin), 3)
+
+
 def _build_language_maps(targets: Tuple[str, ...]) -> Tuple[Dict[str, str], Dict[str, Tuple[str, ...]], Dict[str, Tuple[str, ...]]]:
     """Build (display_map, iso_codes, name_tokens) for the configured targets."""
     display: Dict[str, str] = {}
@@ -417,6 +605,8 @@ class Config:
     # Canonical keys are ISO 639-2 codes; ORDER = audio track order in output.
     # Default (no [languages] section): Hindi, English, Telugu.
     LANG_CANONICAL_ORDER: Tuple[str, ...] = _DEFAULT_TARGETS
+    # Identify tracks tagged 'und' — [languages] detect_undetermined.
+    DETECT_UNDETERMINED_LANGS: bool = True
     # Full display names used in the output filename bracket list and track naming.
     LANG_DISPLAY_MAP: Dict[str, str] = dataclasses.field(
         default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[0])
@@ -528,6 +718,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         if iso2 not in targets:
             targets.append(iso2)
     lang_order = tuple(targets)
+
+    detect_und = languages.get("detect_undetermined", True)
+    if not isinstance(detect_und, bool):
+        raise ConfigError("[languages] detect_undetermined must be true or false")
     lang_display, lang_iso_codes, lang_tokens = _build_language_maps(lang_order)
 
     def required(section: Dict[str, Any], section_name: str, key: str) -> str:
@@ -576,6 +770,7 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         SUB_LANGS=sub_langs,
         STRIP_PREFIXES=strip_prefixes,
         LANG_CANONICAL_ORDER=lang_order,
+        DETECT_UNDETERMINED_LANGS=detect_und,
         LANG_DISPLAY_MAP=lang_display,
         LANG_ISO_CODES=lang_iso_codes,
         LANG_NAME_TOKENS=lang_tokens,
@@ -1804,7 +1999,7 @@ def apply_track_lang_overrides(
             logging.info("Force-lang override: track %d (%s) %r -> %s", t.id, t.type, t.language, canon)
             t.language = canon
             if not t.name or t.name.strip().lower() in ("", "und", "2 channels", "stereo", "5.1"):
-                t.name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
+                t.name = language_display(canon)
 
 
 def fix_track_langs_inplace(
@@ -1829,14 +2024,14 @@ def fix_track_langs_inplace(
             audio_idx += 1
             if t.id in audio_overrides:
                 canon = audio_overrides[t.id]  # canonical == ISO 639-2 code
-                name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
+                name = language_display(canon)
                 cmd += ["--edit", f"track:a{audio_idx}", "--set", f"language={canon}", "--set", f"name={name}"]
                 any_change = True
         elif t.type == "subtitles":
             sub_idx += 1
             if t.id in sub_overrides:
                 canon = sub_overrides[t.id]
-                name = CFG.LANG_DISPLAY_MAP.get(canon, canon)
+                name = language_display(canon)
                 cmd += ["--edit", f"track:s{sub_idx}", "--set", f"language={canon}", "--set", f"name={name}"]
                 any_change = True
     if any_change:
@@ -1854,6 +2049,195 @@ def is_sdh_subtitle(track: Track) -> bool:
         return True
     props = track.extra.get("properties", {}) or {}
     return bool(props.get("hearing_impaired_flag", False))
+
+
+
+def language_display(canon: str) -> str:
+    """English display name for a canonical code, target or not."""
+    name = CFG.LANG_DISPLAY_MAP.get(canon) if CFG else None
+    if name:
+        return name
+    entry = _LANGUAGE_TABLE.get(canon)
+    return entry[1] if entry else canon
+
+
+_ORIG_LANG_CACHE: Dict[str, Optional[str]] = {}
+_ORIG_LANG_LOCK = threading.Lock()
+
+
+def split_show_year(show: str) -> Tuple[str, Optional[str]]:
+    """
+    Split a show label into (title, year). infer_tv_components may return either
+    'Show Name (2026)' or a bare 'Show Name 2026' depending on how the release was named,
+    and leaving the year glued to the title turns the lookup into an
+    unconstrained search — which is how 'Show Name 2026' once resolved to the French
+    series 'Show Name Extended'.
+    """
+    text = (show or "").strip()
+    m = re.search(r"^(.*?)\s*\((\d{4})\)\s*$", text)
+    if not m:
+        m = re.search(r"^(.*?)\s+(\d{4})$", text)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2)
+    return text, None
+
+
+def tmdb_original_language(title: str, year: Optional[str], is_tv: bool) -> Optional[str]:
+    """
+    The language a title was made in, as a canonical ISO 639-2 code.
+
+    Used to label a lone 'und' audio track: a release stripped of track metadata
+    still almost always carries the original audio, and TMDB knows what that is.
+    Returns None when the title cannot be resolved, so the track stays 'und'.
+    """
+    if not CFG.TMDB_API_KEY or not title:
+        return None
+    if not year:
+        # An unconstrained search returns whatever is most popular under that
+        # name, whose language is not necessarily this title's.
+        logging.debug("No year for %r — skipping original-language lookup.", title)
+        return None
+    key = f"{'tv' if is_tv else 'movie'}|{title.strip().lower()}|{year}"
+    with _ORIG_LANG_LOCK:
+        if key in _ORIG_LANG_CACHE:
+            return _ORIG_LANG_CACHE[key]
+
+    canon: Optional[str] = None
+    try:
+        tmdb_id = _tmdb_search_best(title, year, is_tv)
+        if tmdb_id:
+            kind = "tv" if is_tv else "movie"
+            data = _http_get_json(
+                f"https://api.themoviedb.org/3/{kind}/{tmdb_id}?api_key={CFG.TMDB_API_KEY}")
+            iso1 = str((data or {}).get("original_language") or "").strip()
+            if iso1:
+                canon = resolve_language(iso1)
+                if canon:
+                    logging.debug("TMDB original language for %r (%s): %s -> %s",
+                                  title, year, iso1, canon)
+    except Exception as e:
+        logging.debug("TMDB original-language lookup failed for %r: %s", title, e)
+
+    with _ORIG_LANG_LOCK:
+        _ORIG_LANG_CACHE[key] = canon
+    return canon
+
+
+def _extract_subtitle_text(mkv: Path, track_ids: List[int], max_bytes: int = 65536) -> Dict[int, str]:
+    """
+    Pull the text of the given subtitle tracks out of an MKV (read-only).
+    Returns {track_id: text}; tracks that fail to extract are simply absent.
+    """
+    if not track_ids or not CFG.MKVEXTRACT_EXE.exists():
+        return {}
+    import tempfile
+    out: Dict[int, str] = {}
+    with tempfile.TemporaryDirectory(prefix="mclang_") as tmpdir:
+        tmp = Path(tmpdir)
+        cmd = [str(CFG.MKVEXTRACT_EXE), "tracks", str(mkv)]
+        cmd += [f"{tid}:{tmp / f'{tid}.sub'}" for tid in track_ids]
+        r = run_cmd(cmd, timeout_sec=600)
+        if not r.ok:
+            logging.debug("mkvextract for language detection failed (rc=%s): %s", r.rc, r.err)
+        for tid in track_ids:
+            f = tmp / f"{tid}.sub"
+            if not f.exists():
+                continue
+            try:
+                with open(f, "rb") as fh:
+                    raw = fh.read(max_bytes)
+                out[tid] = raw.decode("utf-8", errors="replace")
+            except OSError as e:
+                logging.debug("Could not read extracted track %d: %s", tid, e)
+    return out
+
+
+def _track_codec_id(track: Track) -> str:
+    """
+    The Matroska codec id ('S_TEXT/UTF8'). mkvmerge reports it under the track's
+    'properties' object; Track.codec_id reads the track root, where this version
+    does not put it, so go to properties first and fall back to the root.
+    """
+    props = track.extra.get("properties", {}) or {}
+    return str(props.get("codec_id") or track.codec_id or "").upper()
+
+
+def resolve_undetermined_track_languages(
+    mkv: Path,
+    tracks: List[Track],
+    title: Optional[str],
+    year: Optional[str],
+    is_tv: bool,
+    audio_overrides: Dict[int, str],
+    sub_overrides: Dict[int, str],
+) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """
+    Work out the language of tracks tagged 'und', without guessing from position.
+
+    Audio: a release stripped of metadata carries the original audio, so a
+    single unlabelled audio track takes the title's TMDB original language.
+    With two or more we cannot tell which is which, and they stay 'und' —
+    --force-audio-lang remains the answer there.
+
+    Subtitles: identified from the subtitle text itself (see
+    identify_text_language), which finds every language present rather than
+    hoping the wanted one was muxed first.
+
+    Returns (audio_map, sub_map) of track id -> canonical code, for tracks that
+    were resolved. Explicit --force-* overrides are never touched.
+    """
+    resolved_audio: Dict[int, str] = {}
+    resolved_subs: Dict[int, str] = {}
+
+    def undetermined(t: Track, forced: Dict[int, str]) -> bool:
+        return (t.id not in forced
+                and (t.language or "und").lower() in ("", "und")
+                and detect_language_canonical(t) is None)
+
+    # --- audio: the title's original language, only when unambiguous ---------
+    audio = [t for t in tracks if t.type == "audio" and not is_excluded_audio(t)]
+    unlabelled_audio = [t for t in audio if undetermined(t, audio_overrides)]
+    if unlabelled_audio:
+        if len(audio) > 1:
+            logging.info("%d audio tracks are unlabelled in %s — cannot tell them apart; "
+                         "use --force-audio-lang to set them.", len(unlabelled_audio), mkv.name)
+        elif title:
+            canon = tmdb_original_language(title, year, is_tv)
+            if canon:
+                resolved_audio[unlabelled_audio[0].id] = canon
+                logging.info("Audio track %d in %s is unlabelled — %s is in %s per TMDB, using that.",
+                             unlabelled_audio[0].id, mkv.name, title,
+                             language_display(canon))
+            else:
+                logging.info("Audio track %d in %s is unlabelled and TMDB has no original "
+                             "language for %r — leaving it undetermined.",
+                             unlabelled_audio[0].id, mkv.name, title)
+
+    # --- subtitles: read the text and identify it ----------------------------
+    candidates = [t for t in tracks
+                  if t.type == "subtitles"
+                  and _track_codec_id(t) in _TEXT_SUB_CODECS
+                  and undetermined(t, sub_overrides)]
+    if candidates:
+        texts = _extract_subtitle_text(mkv, [t.id for t in candidates])
+        named: List[str] = []
+        for t in candidates:
+            text = texts.get(t.id)
+            if not text:
+                continue
+            canon, conf = identify_text_language(text)
+            if canon:
+                resolved_subs[t.id] = canon
+                named.append(f"{t.id}={language_display(canon)}({conf})")
+        if named:
+            logging.info("Identified %d of %d unlabelled subtitle tracks in %s: %s",
+                         len(resolved_subs), len(candidates), mkv.name, ", ".join(named))
+        unresolved = len(candidates) - len(resolved_subs)
+        if unresolved:
+            logging.info("%d subtitle track(s) in %s could not be identified — left undetermined.",
+                         unresolved, mkv.name)
+
+    return resolved_audio, resolved_subs
 
 
 def codec_family_video(track: Track) -> str:
@@ -5240,6 +5624,19 @@ def process_movie_group(
 
         movie_title = f"{movie_name} ({year})" if year else movie_name
 
+        # Work out what 'und' tracks actually are before any selection runs,
+        # so releases stripped of track metadata are not written off as having
+        # no target languages.
+        if CFG.DETECT_UNDETERMINED_LANGS:
+            for _src_file, (_tracks, _sz) in metas.items():
+                _ra, _rs = resolve_undetermined_track_languages(
+                    _src_file, _tracks, movie_name, year, False,
+                    force_audio_langs or {}, force_sub_langs or {})
+                if _ra or _rs:
+                    force_audio_langs = {**(force_audio_langs or {}), **_ra}
+                    force_sub_langs = {**(force_sub_langs or {}), **_rs}
+                    apply_track_lang_overrides(_tracks, _ra, _rs)
+
         # Best video (prefer x265/HEVC)
         best_video_file, best_video = choose_best_video_across_files(metas)
 
@@ -5400,6 +5797,7 @@ def process_movie_group(
                     "audio_tracks": [atrack.id],
                     "sub_tracks": None,
                     "track_names": {atrack.id: lang_full_name},
+                    "languages": {atrack.id: canon},
                 }
                 parts.append((afile, a_opt))
                 logging.info("Adding audio track: %s from %s (track %d, codec=%s, channels=%s)",
@@ -5414,6 +5812,8 @@ def process_movie_group(
                 "audio_tracks": None,
                 "sub_tracks": [t.id for t in stracks],
                 "track_names": {},
+                "languages": {t.id: t.language for t in stracks
+                              if (t.language or "und").lower() != "und"},
             }
             parts.append((sfile, s_opt))
             for st in stracks:
@@ -5654,6 +6054,17 @@ def process_tv_file(
 
         show_name, season_str, ep_str, ep_title = infer_tv_components(src)
 
+        # Same as the movie path: identify 'und' tracks before selection.
+        if CFG.DETECT_UNDETERMINED_LANGS:
+            _bare_show, _show_year = split_show_year(show_name or "")
+            _ra, _rs = resolve_undetermined_track_languages(
+                src, tracks, _bare_show or show_name, _show_year, True,
+                force_audio_langs or {}, force_sub_langs or {})
+            if _ra or _rs:
+                force_audio_langs = {**(force_audio_langs or {}), **_ra}
+                force_sub_langs = {**(force_sub_langs or {}), **_rs}
+                apply_track_lang_overrides(tracks, _ra, _rs)
+
         best_video_file, best_v = choose_best_video_across_files(metas)
         # Keep ALL audio tracks per target language (supports duplicate tracks, e.g. stereo + 5.1)
         audios = collect_all_audio_by_language(metas)
@@ -5783,6 +6194,7 @@ def process_tv_file(
                     "audio_tracks": [t.id],
                     "sub_tracks": None,
                     "track_names": {t.id: title},
+                    "languages": {t.id: canon},
                 }))
 
         # All subtitle tracks grouped by source file (tags cleaned later by mkvpropedit)
@@ -5794,6 +6206,8 @@ def process_tv_file(
                 "audio_tracks": None,
                 "sub_tracks": [t.id for t in stracks],
                 "track_names": {},
+                "languages": {t.id: t.language for t in stracks
+                              if (t.language or "und").lower() != "und"},
             }))
             for st in stracks:
                 logging.info("  Sub track %d: lang=%s codec=%s forced=%s name=%r",
@@ -6028,6 +6442,10 @@ def main() -> int:
     ap.add_argument("--skip-coverart", action="store_true",
                     help="Disable the automatic cover art embed that runs as the final pipeline step. "
                          "(The standalone --coverart mode is unaffected.)")
+    ap.add_argument("--no-lang-detect", action="store_true",
+                    help="Do not try to identify tracks tagged 'und'. By default a lone unlabelled "
+                         "audio track takes the title's original language and unlabelled text "
+                         "subtitles are identified from their own text.")
     ap.add_argument("--force-video-lang", metavar="LANG", default=None,
                     help="Set the VIDEO track language to this value during tag cleaning instead of "
                          "the title's TMDB original language. Accepts any supported language "
@@ -6074,6 +6492,10 @@ def main() -> int:
         logging.error("%s", e)
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
+
+    if args.no_lang_detect and CFG.DETECT_UNDETERMINED_LANGS:
+        CFG = dataclasses.replace(CFG, DETECT_UNDETERMINED_LANGS=False)
+        logging.info("Undetermined-language detection disabled (--no-lang-detect).")
 
     global _FETCH_TAGS_ENABLED, _PREVIEW_EXACT
     if args.no_fetch_tags:

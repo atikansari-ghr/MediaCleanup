@@ -79,6 +79,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
 | `--force-video-lang LANG` | Stamp the **video** track with this language instead of the title's TMDB original language. Accepts any supported language, not just targets. |
+| `--no-lang-detect` | Do not try to identify tracks tagged `und` (see [Releases with no language tags](#releases-with-no-language-tags)). Config equivalent: `[languages] detect_undetermined = false`. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
 | `--skip-coverart` | Disable the automatic cover art embed at the end of the pipeline. |
 | `--include-forced-subs` | Allow forced-flag subtitle selection. |
@@ -129,6 +130,28 @@ targets = ["hin", "eng", "tel"]     # the default — Hindi, English, Telugu
 - Accepts **every form**: ISO 639-1 (`"ko"`), ISO 639-2 bibliographic (`"kor"`) *and* terminological (`"fra"`), full English names (`"Korean"`), and common alternates (Farsi, Punjabi, Bangla…). The complete ISO 639 registry is built in (189 languages); BCP-47 track tags like `zh-Hans` are understood too.
 - Detection, display names, subtitle keeping, and cover art poster-language preference all follow the configured targets automatically.
 - **Video track language**: encoders usually leave it `und`; during tag cleaning the script sets it to the title's original language from TMDB. Override per run with `--force-video-lang`.
+
+## Releases with no language tags
+
+Some releases arrive with **every** track tagged `und` — no language field, no BCP-47 tag, no track name. There is nothing to match against, so such a file looks like it contains none of your target languages and gets reported `NoAudioMatch`, even when the audio is in a language you keep.
+
+Rather than guess from track order, the script works out what those tracks actually are (on by default; `--no-lang-detect`, or `detect_undetermined = false`, turns it off):
+
+- **Audio** — a release stripped of metadata still carries the original audio, so a **single** unlabelled audio track takes the title's original language from TMDB. With two or more unlabelled audio tracks there is no way to tell which is which: they stay `und`, and `--force-audio-lang` remains the answer. When the title cannot be resolved to a specific year, no lookup is made at all — an unconstrained search returns whatever is most popular under that name, whose language is not necessarily this title's.
+- **Subtitles** — text tracks (SRT/ASS/SSA/WebVTT) are identified from **their own text**. Writing system settles most languages outright (Hangul, Thai, Hebrew, Greek, Tamil, Telugu, kana, Han…); the ones that share an alphabet are separated by function-word frequency, with near-exclusive letters as a tiebreak for close pairs like Czech/Slovak and Danish/Norwegian. Image subtitles (PGS/VobSub) carry no text and are skipped.
+
+Anything that cannot be called confidently keeps its `und` tag — a wrong language tag is worse than an honest unknown. Detected languages are written into the file, so the tracks are labelled correctly in Plex/Jellyfin whether the file is remuxed or finished in place.
+
+A real example — a release with one `und` audio track and 42 `und` subtitle tracks:
+
+```
+Audio track 1 ... is unlabelled — Show Name is in English per TMDB, using that.
+Identified 42 of 42 unlabelled subtitle tracks: 2=English(0.795), 3=English(0.795),
+  4=Arabic(0.994), 5=Bulgarian(0.445), ... 22=Korean(1.0), 36=Telugu(1.0), 41=Chinese(1.0)
+[DRY] Final name would be: Show Name (2026) - S01E03 - An Episode Title - 1080p.x265 - [English].mkv
+```
+
+The number after each language is confidence: `1.0` means the writing system alone was decisive.
 
 ## Cover art
 

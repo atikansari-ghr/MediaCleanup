@@ -61,6 +61,8 @@ strip_prefixes = ["SomeDistributor", "AnotherName"]
 |---|---|---|
 | `targets` | No (default `["hin", "eng", "tel"]`) | Audio languages to **keep** — all others are stripped during remux. **List order = audio track order** in output files. Accepts every form — ISO 639-1 (`ko`), ISO 639-2 B/T (`kor`/`fra`), full English names (`Korean`) — against the complete built-in ISO 639 registry (189 languages). |
 
+| `detect_undetermined` | No (default `true`) | Identify tracks tagged `und` instead of discarding them. A lone unlabelled audio track takes the title's TMDB original language; unlabelled text subtitles are identified from their own text. Anything that cannot be called confidently stays `und`. Per-run override: `--no-lang-detect`. |
+
 Everything language-related derives from this list: track detection (including native-script track names for Indian languages), the display names in the filename `[...]` bracket, which subtitles are kept, what `--audio-langs`/`--force-audio-lang` accept, and the poster-language preference for cover art (English always first, then your targets). The video track language is set separately from the title's TMDB original language (override: `--force-video-lang`).
 
 ## `[coverart]`

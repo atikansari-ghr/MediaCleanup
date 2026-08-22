@@ -53,6 +53,15 @@ strip_prefixes = []
 # Examples:  ["spa", "eng"]   ["Japanese", "English"]   ["hin", "tam", "eng"]
 targets = ["hin", "eng", "tel", "kor"]
 
+# Work out what tracks tagged "und" actually are (default true). Some releases
+# strip every track's language metadata; without this they look like they have
+# no audio in your target languages at all.
+#   Audio     — a single unlabelled track takes the title's original language.
+#   Subtitles — text tracks are identified from their own text.
+# Tracks that cannot be identified confidently keep their "und" tag.
+# Turn off for a single run with --no-lang-detect.
+detect_undetermined = true
+
 [coverart]
 # API keys for the --coverart mode. All optional — an empty value disables that
 # source. Local poster files (poster.jpg/cover.jpg/folder.jpg) always work.
