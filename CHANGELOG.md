@@ -3,6 +3,12 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] — 2026-08-22
+
+### Fixed
+- **A series could be renamed as a different, similarly-named show.** FileBot's fuzzy search answers a query for `Show Name` with `Show Name Extended` — also a 2026 series, so the year constraint could not separate them — and because that lookup *succeeded*, nothing questioned it: the episode was renamed and tagged with the wrong show's episode titles. The lookup now also constrains the series **name**: a candidate whose name is not the one asked for is dropped (a trailing parenthetical is stripped first, so TheTVDB's `Show Name (2024)` and `Some Show (US)` still match). With no candidate left the attempt fails and the TMDB series-id fallback resolves the show by exact title. The constraint applies only to the attempt carrying our query — the later "retry without query", which exists for when the inferred title is wrong, is deliberately left unconstrained.
+- **Bare-year show labels left the lookup unconstrained.** `infer_tv_components` returns either `Show (2026)` or a bare `Show 2026` depending on the release; two places parsed only the parenthesised form. For the bare form no year was found, so the year filter was empty *and* the TMDB fallback could not run — a file could be renamed to a same-named series from any year (a 2026 episode matched `Show Name! (2022)` in testing). Both now use `split_show_year`, and the resolved year is passed to the filter builder instead of being re-parsed from the raw label.
+
 ## [1.7.1] — 2026-08-22
 
 ### Fixed

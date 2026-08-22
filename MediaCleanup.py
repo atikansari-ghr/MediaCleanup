@@ -1422,6 +1422,39 @@ def _filebot_year_filter(query: Optional[str], db: str, year: Optional[str] = No
     return ["--filter", f"y >= {y - 1} && y <= {y + 1}"]
 
 
+def _normalise_for_match(text: str) -> str:
+    """Reduce a title to its letters and digits, so punctuation and case cannot
+    make two spellings of the same name look different."""
+    return "".join(ch for ch in (text or "") if ch.isalnum()).lower()
+
+
+def _filebot_series_name_filter(year_filter: List[str], show: str, db: str) -> List[str]:
+    """
+    Extend a FileBot --filter so the matched SERIES must be the one we asked for.
+
+    FileBot's fuzzy search happily answers a query for 'Show Name' with 'Show Name Extended'
+    — a different 2026 series, so the year constraint cannot separate them — and
+    the rename then succeeds with the wrong show's episode titles. A --filter
+    cannot steer the search, but it drops candidates the search produced: with
+    no candidate left the attempt fails and the TMDB series-id fallback takes
+    over, which resolves the series by exact title.
+
+    TheTVDB's own name may carry a disambiguating suffix ('Show Name (2024)',
+    'Some Show (US)'), so a trailing parenthetical is stripped before
+    comparing. TV only — this is about series identity.
+    """
+    if db != "TheTVDB":
+        return year_filter
+    want = _normalise_for_match(re.sub(r"\s*\([^)]*\)\s*$", "", show or ""))
+    if not want:
+        return year_filter
+    name_expr = (r"(n ?: '').replaceAll(/\s*\([^)]*\)\s*$/, '')"
+                 r".replaceAll(/[^\p{L}\p{N}]/, '').toLowerCase() == '" + want + "'")
+    if year_filter:
+        return ["--filter", f"({year_filter[1]}) && {name_expr}"]
+    return ["--filter", name_expr]
+
+
 def _filebot_failure_reason(out_txt: str, err_txt: str, rc: Optional[int], db: str) -> str:
     """Condense FileBot's output into one line fit for the summary table."""
     blob = "\n".join((out_txt or "", err_txt or ""))
@@ -1500,17 +1533,24 @@ def run_filebot_rename_final_mkv(
     show_year: Optional[str] = None
     search_q = query
     if is_tv_db and query:
-        ym = re.search(r"\((\d{4})\)", query)
-        show_year = ym.group(1) if ym else None
-        search_q = re.sub(r"\s*\(\d{4}\)\s*$", "", query).strip() or query
+        # Handles 'Show (2026)' and a bare 'Show 2026' alike — missing the
+        # second form left the lookup unconstrained and unrescuable.
+        bare, show_year = split_show_year(query)
+        search_q = bare or query
 
     # Year constraint: stops a same-title film/series from another year winning
     # when the title match is imperfect. ±1 absorbs release-date drift.
-    year_filter = _filebot_year_filter(query, db)
+    # Pass the year we resolved above: re-parsing `query` here would miss a bare
+    # 'Show 2026' label and leave the attempt unconstrained by year.
+    year_filter = _filebot_year_filter(query, db, year=show_year if is_tv_db else None)
 
     # Override FileBot's filename-based search with a clean title so junk
     # in the original filename doesn't corrupt the DB lookup result.
-    cmd = base_cmd + (["--q", search_q] if search_q else []) + year_filter
+    # The name constraint goes only on the attempt that carries our query. The
+    # later "retry without query" exists for when our inferred title is wrong,
+    # so constraining it by that same title would defeat it.
+    match_filter = _filebot_series_name_filter(year_filter, search_q or "", db)
+    cmd = base_cmd + (["--q", search_q] if search_q else []) + match_filter
     if search_q:
         logging.debug("FileBot query override: %s", search_q)
 
@@ -4878,9 +4918,8 @@ def process_rename_one(
         tv_year: Optional[str] = None
         if is_tv:
             show_name, _s, _e, _t = infer_tv_components(mkv)
-            ym = re.search(r"\((\d{4})\)", show_name or "")
-            tv_year = ym.group(1) if ym else None
-            query = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip() or None
+            _bare, tv_year = split_show_year(show_name or "")
+            query = _bare or None
             db = "TheTVDB"
             fmt = TV_FILEBOT_FORMAT_DIR if target_root else TV_FILEBOT_FORMAT
         else:
@@ -4918,7 +4957,9 @@ def process_rename_one(
         base_cmd = plain_cmd + year_filter
         if query:
             cmd += ["--q", query]
-        cmd += year_filter
+            cmd += _filebot_series_name_filter(year_filter, query, db)
+        else:
+            cmd += year_filter
 
         r = run_cmd(cmd, timeout_sec=600)
         out_txt = (r.out or "").strip()
