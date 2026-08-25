@@ -64,6 +64,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--rename-into` | With `--rename`: move files into the library structure under the configured roots. |
 | `--rename-undo` | Revert the most recent `--rename` batch, then exit. |
 | `--subtitles` | Standalone: download missing subtitles from OpenSubtitles.com as sidecar `.srt` files. See [Subtitles](#subtitles). |
+| `--mp4tomkv` | Standalone: remux MP4/M4V (plus any sidecar `.srt`) into MKV beside the source, then finish it completely. Sources are never modified or deleted. See [Converting MP4 to MKV](#converting-mp4-to-mkv). |
 | `--validate-keys` | Test each configured API key (TMDB, fanart.tv, OMDb, OpenSubtitles) with one cheap call, print a verdict per source, exit (code 1 if any configured key is invalid). |
 | `--no-fetch-tags` | Disable rich metadata tagging; tag cleaning reverts to basic (title + IMDB id only). |
 | `--self-check` | Validate tool paths, folder access, and API keys; parse a sample MKV; exit. |
@@ -152,6 +153,35 @@ Identified 42 of 42 unlabelled subtitle tracks: 2=English(0.795), 3=English(0.79
 ```
 
 The number after each language is confidence: `1.0` means the writing system alone was decisive.
+
+## Converting MP4 to MKV
+
+MP4 has no Matroska tags and normally leaves every track `und`, so those files cannot be tagged, language-labelled or given cover art. `--mp4tomkv` fixes that in one command:
+
+```bash
+python MediaCleanup.py --mp4tomkv --movies
+```
+
+Each `.mp4`/`.m4v` is remuxed with `mkvmerge` — **lossless, never re-encoded** — into an `.mkv` beside it, then handed to the ordinary finishing chain: tag cleaning, TMDB/OMDb metadata, language resolution, cover art, database rename.
+
+```
+Some.Film.2026.1080p.WEBRip.x264-GRP.mp4  +  Some.Film.2026.1080p.WEBRip.x264-GRP.srt
+      -> Some Film (2026) - tt1234567 - WEBRip.1080p.x264 - [English].mkv
+```
+
+**Your source files are never touched.** The `.mp4` and `.srt` stay exactly where they were, whatever else happens — `--inplace` does not apply here. A ledger (`logs\mp4tomkv_done.csv`) records what has been converted so re-runs skip it; `--overwrite` ignores the ledger and redoes the work.
+
+**Sidecar subtitles.** Any `.srt` whose name matches the video's (`<stem>.srt`, `<stem>.<tag>.srt`) is muxed in. Three things happen to it first:
+
+- **Advertising is removed.** Some subtitles open or close with promotional cues that play over the film rather than translating it. A cue is treated as an advert when its text is structurally one — a web address, or stock phrasing such as "downloaded from" or "please visit" — and only when it falls in the first or last minute, so a line of dialogue that mentions a web address mid-film survives. Site names are not built in: whatever you list in `[naming] strip_prefixes` is matched too, the same list used to strip those names from filenames. Every removal is logged.
+- **Forced tracks are flagged.** A subtitle carrying fewer than two cues a minute translates foreign dialogue rather than everything. It gets the forced flag, so players show it automatically over untranslated speech — and it is kept even though forced tracks are normally excluded, since dropping a film's only subtitle helps nobody.
+- **The language is read from the text itself** (see [Releases with no language tags](#releases-with-no-language-tags)), because sidecar files rarely say what language they are.
+
+**Languages**, since MP4 supplies none: a lone audio track and the video track take the title's TMDB original language; the subtitle is identified from its own text.
+
+**Chapters are kept** — they are real navigation data — but any chapter *name* that advertises is rewritten to a plain `Chapter NN`.
+
+This is the one place the tool edits stream content rather than metadata alone, a deliberate exception to the safety model in [Safety](#safety-model) made so that advertising cannot be welded permanently into your library.
 
 ## Cover art
 

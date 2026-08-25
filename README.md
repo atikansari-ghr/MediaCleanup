@@ -125,6 +125,7 @@ python MediaCleanup.py --coverart                        :: embed cover art in-p
 python MediaCleanup.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
 python MediaCleanup.py --rename-undo                     :: revert the last rename batch
 python MediaCleanup.py --subtitles                       :: download missing sidecar subs
+python MediaCleanup.py --mp4tomkv --movies               :: MP4 (+ sidecar .srt) -> finished MKV
 python MediaCleanup.py --validate-keys                   :: test all configured API keys
 python MediaCleanup.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
 python MediaCleanup.py --cleantags --clear               :: strip all tags/title/track names

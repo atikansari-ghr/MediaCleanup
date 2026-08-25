@@ -48,7 +48,7 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 
 | Key | Required | Description |
 |---|---|---|
-| `strip_prefixes` | No (default `[]`) | Extra filename prefixes to remove before the title is read. Prefixes that look like a web address (`www.something.net - …`) are handled automatically; use this for names stamped on with no domain suffix (`SomeDistributor.The.Film.2024.1080p.mkv`). Matched case-insensitively, longest first, chained up to three deep, with a guard that stops it eating a short title. |
+| `strip_prefixes` | No (default `[]`) | Extra filename prefixes to remove before the title is read. Prefixes that look like a web address (`www.something.net - …`) are handled automatically; use this for names stamped on with no domain suffix (`SomeDistributor.The.Film.2024.1080p.mkv`). Matched case-insensitively, longest first, chained up to three deep, with a guard that stops it eating a short title. Also used by `--mp4tomkv` when deciding whether a subtitle cue or chapter name is an advertisement, so a name listed here is recognised in both places. |
 
 ```toml
 [naming]

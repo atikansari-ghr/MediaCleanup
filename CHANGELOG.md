@@ -3,6 +3,15 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] — 2026-08-25
+
+### Added
+- **`--mp4tomkv` — convert MP4/M4V into finished MKVs.** MP4 carries no Matroska tags and usually leaves every track `und`, so these files could not be tagged, language-labelled or cover-arted at all. The new mode remuxes them with `mkvmerge` (lossless, never re-encoded), muxes in any sidecar `.srt`, and then runs the ordinary finishing chain — tag cleaning, TMDB/OMDb metadata, language resolution, cover art and the database rename — so a release goes from `Some.Film.2026.1080p.WEBRip.x264-GRP.mp4` to `Some Film (2026) - tt… - WEBRip.1080p.x264 - [English].mkv` in one command. Sources are only ever read: the `.mp4` and `.srt` are always kept. Scoped by `--movies`/`--tv`/`--input`/`--filter` like the other standalone modes, with a ledger so re-runs skip work already done.
+  - **Advertising cues are stripped from sidecar subtitles.** Some subtitles carry promotional cues at the very start or end, where they play over the film instead of translating it. Cues whose text is structurally an advert — a web address, or stock phrasing such as "downloaded from" or "please visit" — are removed when they fall in the first or last minute, so dialogue that happens to mention a web address mid-film is left alone. Each removal is logged. As with filename prefixes, no distributor or site names ship in the source: the names from `[naming] strip_prefixes` in your own config are folded into the match at runtime. This is a deliberate, narrowly-scoped exception to the G4 guarantee, the only place the tool edits stream content rather than metadata.
+  - **Forced subtitles are detected and flagged.** A track carrying under two cues per minute only covers foreign dialogue, not everything; it gets the Matroska forced flag so players show it automatically over untranslated speech, and it is kept even though forced tracks are normally excluded, because dropping the only subtitle a film has is worse.
+  - **Subtitle language comes from the subtitle text**, audio and video from the title's TMDB original language — MP4 supplies none of them.
+  - **Chapters are preserved**, with any chapter *name* that advertises rewritten to a plain `Chapter NN`. (The main remux still strips chapters outright; that inconsistency is left as-is for now.)
+
 ## [1.7.3] — 2026-08-22
 
 ### Fixed

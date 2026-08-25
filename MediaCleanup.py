@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import collections
 import concurrent.futures
+import csv
 import dataclasses
 import datetime as _dt
 import difflib
@@ -5762,6 +5763,513 @@ def predict_tv_final_name(sample: Path, show: str, season_str: Optional[str], ep
     return None
 
 
+
+# =========================
+# MP4 -> MKV conversion (--mp4tomkv)
+# =========================
+# MP4 carries no Matroska tags and usually leaves every track 'und', so a
+# converted file relies on the same identification the rest of the tool uses.
+# mkvmerge reads MP4 natively, so this is a lossless remux, never a re-encode.
+
+VIDEO_CONVERT_EXTS: Tuple[str, ...] = (".mp4", ".m4v")
+SIDECAR_SUB_EXTS: Tuple[str, ...] = (".srt",)
+
+# Cues and chapter names that advertise rather than translate. Releases inject
+# these at the very start or end of a subtitle, where they play over the film.
+#
+# Only STRUCTURAL patterns ship here — web addresses and the stock phrasings of
+# an advert. Specific distributor or site names are not in the source: they live
+# in [naming] strip_prefixes in the user's own config, the same list already used
+# to strip those names from filenames, and are folded in at runtime below.
+_AD_PATTERNS = re.compile(
+    r"(?i)(?:"
+    r"www\.[a-z0-9-]+\.[a-z]{2,}"          # bare web addresses
+    r"|[a-z0-9-]+\.(?:com|net|org|tv|cat|bz|gg|me|to|in|xyz|top|club|site)"
+    r"|downloaded\s+from|please\s+visit|visit\s+(?:us|our)"
+    r"|subtitles?\s+by\s+\S+|advertise\s+your|support\s+us"
+    r"|official\s+\S+\s+(?:movies?|site)"
+    r")"
+)
+
+
+def _looks_like_advertising(text: str) -> bool:
+    """
+    True when a subtitle cue or chapter name advertises rather than belongs to
+    the film. Combines the built-in structural patterns with whatever site names
+    the user configured in [naming] strip_prefixes.
+    """
+    if _AD_PATTERNS.search(text):
+        return True
+    for name in (CFG.STRIP_PREFIXES if CFG else ()):
+        if name and name.lower() in text.lower():
+            return True
+    return False
+
+
+# How far into a subtitle an advertisement is still plausibly an advertisement.
+_AD_WINDOW_S = 60.0
+# Below this many cues per minute a subtitle only covers foreign dialogue.
+_FORCED_CUES_PER_MIN = 2.0
+
+
+def _decode_subtitle_bytes(raw: bytes) -> Tuple[str, str]:
+    """
+    Decode subtitle bytes, returning (text, charset). Sidecar files come in
+    UTF-8 with or without a BOM, and in legacy single-byte encodings; guessing
+    wrong turns accented text into mojibake inside the muxed file.
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="replace"), "UTF-8"
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc), ("UTF-8" if enc == "utf-8" else enc.upper())
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace"), "UTF-8"
+
+
+def _srt_timestamp_seconds(stamp: str) -> Optional[float]:
+    m = re.match(r"(\d+):(\d\d):(\d\d)[,.](\d{1,3})", stamp.strip())
+    if not m:
+        return None
+    h, mi, s, ms = (int(g) for g in m.groups())
+    return h * 3600 + mi * 60 + s + ms / 1000.0
+
+
+def parse_srt(text: str) -> List[Tuple[Optional[float], Optional[float], str, str]]:
+    """
+    Split an SRT into (start_s, end_s, timing_line, body) blocks.
+    Returns [] when the text does not look like SRT at all.
+    """
+    blocks: List[Tuple[Optional[float], Optional[float], str, str]] = []
+    text = text.lstrip("﻿")   # mkvextract writes a BOM; it must not hide cue 1
+    for chunk in re.split(r"\n\s*\n", text.replace("\r\n", "\n").replace("\r", "\n")):
+        lines = [ln for ln in chunk.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        if lines[0].strip().isdigit():
+            lines = lines[1:]
+        if not lines or "-->" not in lines[0]:
+            continue
+        timing = lines[0]
+        start_raw, _, end_raw = timing.partition("-->")
+        blocks.append((_srt_timestamp_seconds(start_raw), _srt_timestamp_seconds(end_raw),
+                       timing.strip(), "\n".join(lines[1:])))
+    return blocks
+
+
+def clean_srt_advertisements(text: str, duration_s: Optional[float]) -> Tuple[str, List[str]]:
+    """
+    Remove advertising cues from an SRT, returning (cleaned_text, removed).
+
+    Only cues inside the first or last minute are eligible: that is where
+    releases inject them, and dialogue mentioning a web address mid-film is
+    real dialogue. Renumbers what remains so the result is a valid SRT.
+    """
+    blocks = parse_srt(text)
+    if not blocks:
+        return text, []
+
+    end_zone = (duration_s - _AD_WINDOW_S) if duration_s else None
+    kept: List[Tuple[str, str]] = []
+    removed: List[str] = []
+    for start, _end, timing, body in blocks:
+        in_window = (start is not None
+                     and (start <= _AD_WINDOW_S or (end_zone is not None and start >= end_zone)))
+        if in_window and _looks_like_advertising(body):
+            removed.append(f"{timing.split('-->')[0].strip()} {' / '.join(body.split(chr(10)))[:60]}")
+            continue
+        kept.append((timing, body))
+
+    if not removed:
+        return text, []
+    rebuilt = "\n\n".join(f"{i}\n{timing}\n{body}" for i, (timing, body) in enumerate(kept, 1))
+    return rebuilt + "\n", removed
+
+
+def subtitle_looks_forced(text: str, duration_s: Optional[float]) -> bool:
+    """
+    True when a subtitle only covers foreign dialogue rather than everything.
+
+    A full subtitle runs to roughly ten cues a minute; a forced one carries a
+    few dozen for a whole film. Flagging it matters because players show forced
+    subtitles automatically over untranslated speech.
+    """
+    blocks = parse_srt(text)
+    if not blocks or not duration_s or duration_s <= 0:
+        return False
+    return (len(blocks) / (duration_s / 60.0)) < _FORCED_CUES_PER_MIN
+
+
+def find_sidecar_subtitles(video: Path) -> List[Path]:
+    """Sidecar subtitles belonging to a video: '<stem>.srt', '<stem>.<tag>.srt'."""
+    stem = video.stem.lower()
+    found: List[Path] = []
+    for p in sorted(video.parent.glob("*")):
+        if not p.is_file() or p.suffix.lower() not in SIDECAR_SUB_EXTS:
+            continue
+        name = p.stem.lower()
+        if name == stem or name.startswith(stem + "."):
+            found.append(p)
+    return found
+
+
+def sanitize_mkv_chapter_names(mkv: Path, dry_run: bool = False) -> int:
+    """
+    Rewrite advertising chapter names in place, keeping every timestamp.
+
+    Chapters are genuine navigation data worth keeping, but a release can rename
+    them into advertising. Names that advertise become a plain 'Chapter NN';
+    nothing else is touched. Returns how many names were rewritten.
+    """
+    if not CFG.MKVEXTRACT_EXE.exists() or not CFG.MKVPROPEDIT_EXE.exists():
+        return 0
+    r = run_cmd([str(CFG.MKVEXTRACT_EXE), str(mkv), "chapters", "-s"], timeout_sec=120)
+    if not r.ok or not (r.out or "").strip():
+        return 0
+
+    lines = (r.out or "").splitlines()
+    changed = 0
+    out_lines: List[str] = []
+    for line in lines:
+        m = re.match(r"(CHAPTER(\d+)NAME)=(.*)$", line.strip())
+        if m and _looks_like_advertising(m.group(3)):
+            out_lines.append(f"{m.group(1)}=Chapter {m.group(2)}")
+            logging.info("Chapter name advertised (%s) — renaming to 'Chapter %s': %s",
+                         m.group(3).strip()[:50], m.group(2), mkv.name)
+            changed += 1
+        else:
+            out_lines.append(line)
+    if not changed or dry_run:
+        return changed
+
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="mcchap_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(out_lines) + "\n")
+        w = run_cmd([str(CFG.MKVPROPEDIT_EXE), str(mkv), "--chapters", tmp], timeout_sec=120)
+        if not w.ok:
+            logging.warning("Could not rewrite chapter names (non-fatal): %s", w.err.strip()[:160])
+            return 0
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return changed
+
+
+MP4TOMKV_LEDGER_CSV = _SCRIPT_DIR / "logs" / "mp4tomkv_done.csv"
+
+
+def _mp4_ledger_path() -> Path:
+    return MP4TOMKV_LEDGER_CSV
+
+
+def _mp4_ledger_load() -> Dict[str, str]:
+    """Sources already converted, keyed by 'path|size' so a re-download redoes it."""
+    done: Dict[str, str] = {}
+    p = _mp4_ledger_path()
+    if not p.exists():
+        return done
+    try:
+        with open(p, "r", encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) >= 2:
+                    done[row[0]] = row[1]
+    except OSError as e:
+        logging.debug("Could not read %s: %s", p.name, e)
+    return done
+
+
+def _mp4_ledger_add(key: str, produced: str) -> None:
+    p = _mp4_ledger_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        new = not p.exists()
+        with open(p, "a", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            if new:
+                w.writerow(["source", "produced", "when"])
+            w.writerow([key, produced, _dt.datetime.now().isoformat(timespec="seconds")])
+    except OSError as e:
+        logging.debug("Could not update %s: %s", p.name, e)
+
+
+def _ledger_key(src: Path) -> str:
+    try:
+        return f"{src}|{src.stat().st_size}"
+    except OSError:
+        return str(src)
+
+
+def scan_convertible(root: Path) -> List[Path]:
+    """Video files that are not Matroska and can be remuxed into it."""
+    if not root.exists():
+        logging.warning("Root not found (skipping): %s", root)
+        return []
+    return sorted(p for p in root.rglob("*")
+                  if p.is_file() and p.suffix.lower() in VIDEO_CONVERT_EXTS)
+
+
+def _prepare_sidecars(video: Path, tmpdir: Path, dry_run: bool) -> List[Dict[str, Any]]:
+    """
+    Read, clean and describe each sidecar subtitle belonging to a video.
+
+    Returns one entry per usable subtitle with its cleaned file, language and
+    forced flag. Advertising cues are removed here, before anything is muxed.
+    """
+    prepared: List[Dict[str, Any]] = []
+    for idx, sub in enumerate(find_sidecar_subtitles(video)):
+        try:
+            raw = sub.read_bytes()
+        except OSError as e:
+            logging.warning("Cannot read subtitle %s: %s", sub.name, e)
+            continue
+        text, charset = _decode_subtitle_bytes(raw)
+
+        blocks = parse_srt(text)
+        if not blocks:
+            logging.warning("Not a usable SRT, skipping: %s", sub.name)
+            continue
+        # The film's runtime is unknown for MP4, so use the subtitle's own last
+        # cue: it tracks the end of the film closely enough for both decisions.
+        duration_s = max((b[1] or b[0] or 0.0) for b in blocks) or None
+
+        cleaned, removed = clean_srt_advertisements(text, duration_s)
+        if removed:
+            logging.info("Removed %d advertising cue(s) from %s:", len(removed), sub.name)
+            for r in removed:
+                logging.info("    %s", r)
+
+        canon, conf = identify_text_language(cleaned)
+        forced = subtitle_looks_forced(cleaned, duration_s)
+        logging.info("Subtitle %s: %s%s, %d cues%s, charset %s",
+                     sub.name,
+                     language_display(canon) if canon else "undetermined",
+                     f" ({conf})" if canon else "",
+                     len(parse_srt(cleaned)),
+                     " — forced/foreign-parts only" if forced else "",
+                     charset)
+
+        out = tmpdir / f"{idx}_{sub.stem[:40]}.srt"
+        if not dry_run:
+            out.write_text(cleaned, encoding="utf-8", newline="\n")
+        prepared.append({"path": out, "source": sub, "lang": canon,
+                         "forced": forced, "removed": len(removed)})
+    return prepared
+
+
+def convert_one_to_mkv(src: Path, dry_run: bool, overwrite: bool) -> Tuple[Optional[Path], str]:
+    """
+    Remux one MP4/M4V (plus any sidecar subtitles) into MKV beside the source.
+
+    The source is only ever READ — it is kept whatever else happens. Returns
+    (output path, reason); output is None when nothing was produced.
+    """
+    target = src.with_suffix(".mkv")
+    if target.exists() and not overwrite:
+        return None, f"an MKV of that name already exists: {target.name}"
+
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mcmp4_") as td:
+        tmpdir = Path(td)
+        subs = _prepare_sidecars(src, tmpdir, dry_run)
+
+        out_tmp = target.with_suffix(".mkv.tmp")
+        cmd = [win_long_path(CFG.MKVMERGE_EXE), "-o", win_long_path(out_tmp),
+               "--no-global-tags",            # MP4 metadata is not worth carrying over
+               win_long_path(src)]            # chapters are kept deliberately
+        for s in subs:
+            if s["lang"]:
+                cmd += ["--language", f"0:{s['lang']}",
+                        "--track-name", f"0:{language_display(s['lang'])}"]
+            cmd += ["--forced-track", f"0:{'yes' if s['forced'] else 'no'}",
+                    "--sub-charset", "0:UTF-8", win_long_path(s["path"])]
+
+        if dry_run:
+            logging.info("[DRY] mkvmerge command: %s", " ".join(cmd))
+            return target, "dry-run"
+
+        r = run_cmd(cmd, timeout_sec=3600)
+        if not r.ok:
+            for leftover in (out_tmp,):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return None, f"mkvmerge failed rc={r.rc}: {(r.err or r.out or '').strip()[:200]}"
+
+        # Sanity: the output must carry the video plus every subtitle we passed.
+        try:
+            meta = mkvmerge_identify_json(out_tmp)
+            kinds = [str(t.get("type")) for t in meta.get("tracks", [])]
+            if kinds.count("video") != 1 or kinds.count("subtitles") != len(subs):
+                out_tmp.unlink(missing_ok=True)
+                return None, (f"unexpected output tracks: video={kinds.count('video')} "
+                              f"subs={kinds.count('subtitles')} (expected 1 and {len(subs)})")
+        except Exception as e:
+            out_tmp.unlink(missing_ok=True)
+            return None, f"could not verify output: {e}"
+
+        os.replace(out_tmp, target)
+
+    renamed = sanitize_mkv_chapter_names(target, dry_run=False)
+    if renamed:
+        logging.info("Sanitized %d advertising chapter name(s): %s", renamed, target.name)
+    return target, "converted"
+
+
+def _predict_converted_final_name(src: Path, is_tv: bool) -> Optional[str]:
+    """
+    The name a converted file would end up with, for --dry-run.
+
+    Everything is read from the MP4 itself except the audio language, which the
+    source leaves 'und' — that comes from the title's TMDB original language,
+    exactly as the real run resolves it.
+    """
+    try:
+        tracks = extract_tracks(src, mkvmerge_identify_json(src))
+    except Exception:
+        return None
+    video = next((t for t in tracks if t.type == "video"), None)
+    if video is None:
+        return None
+
+    res_tag = infer_resolution_tag_from_video(video, fallback_filename=src.name)
+    codec_tag = codec_tag_video(video)
+    if codec_tag in ("unknown", "video"):
+        codec_tag = infer_codec_tag_from_filename(src.name) or codec_tag
+    source_tag = infer_source_tag_from_filename(src.name)
+
+    if is_tv:
+        show, season, ep, ep_title = infer_tv_components(src)
+        bare, year = split_show_year(show or "")
+        langs = _converted_audio_langs(tracks, bare or show, year, True)
+        return predict_tv_final_name(src, show, season, ep, ep_title,
+                                     res_tag, codec_tag, langs, exact=False)
+
+    title, year = infer_movie_name_year_from_path(src)
+    langs = _converted_audio_langs(tracks, title, year, False)
+    return predict_movie_final_name(src, title, year, None, res_tag, source_tag,
+                                    codec_tag, langs, exact=False)
+
+
+def _converted_audio_langs(tracks: List[Track], title: str, year: Optional[str],
+                           is_tv: bool) -> List[str]:
+    """Audio languages the converted file will carry, resolving a lone 'und'."""
+    audio = [t for t in tracks if t.type == "audio" and not is_excluded_audio(t)]
+    langs: List[str] = []
+    for t in audio:
+        canon = detect_language_canonical(t)
+        if canon is None and len(audio) == 1 and title:
+            canon = tmdb_original_language(title, year, is_tv)
+        if canon and canon not in langs:
+            langs.append(canon)
+    return [c for c in CFG.LANG_CANONICAL_ORDER if c in langs] or langs
+
+
+def run_mp4tomkv_pipeline(
+    do_movies: bool,
+    do_tv: bool,
+    movies_root: Path,
+    tv_root: Path,
+    dry_run: bool,
+    overwrite: bool,
+    filters: Optional[List[str]],
+    include_forced_subs: bool,
+    audio_lang_filter: Optional[List[str]],
+    skip_cleantags: bool,
+    force_audio_langs: Optional[Dict[int, str]],
+    force_sub_langs: Optional[Dict[int, str]],
+) -> List[Result]:
+    """
+    Convert MP4/M4V files to MKV and finish them completely.
+
+    Each source is remuxed beside itself (never re-encoded, never deleted), any
+    sidecar subtitle is cleaned of advertising and muxed in, then the finished
+    MKV goes through the ordinary per-item pipeline — tag cleaning, metadata,
+    language resolution, cover art and the database rename — so nothing about
+    the finishing behaviour is duplicated here.
+    """
+    targets: List[Tuple[Path, bool, Path]] = []
+    if do_movies:
+        found = apply_scan_filters(scan_convertible(movies_root), movies_root, filters, "mp4tomkv")
+        logging.info("mp4tomkv - Movies: %d convertible file(s) in %s.", len(found), movies_root)
+        targets += [(p, False, movies_root) for p in found]
+    if do_tv:
+        found = apply_scan_filters(scan_convertible(tv_root), tv_root, filters, "mp4tomkv")
+        logging.info("mp4tomkv - TV: %d convertible file(s) in %s.", len(found), tv_root)
+        targets += [(p, True, tv_root) for p in found]
+
+    if not targets:
+        logging.info("mp4tomkv: nothing to convert.")
+        return []
+
+    ledger = _mp4_ledger_load()
+    results: List[Result] = []
+
+    for src, is_tv, root in targets:
+        key = _ledger_key(src)
+        if key in ledger and not overwrite:
+            logging.info("Already converted (ledger), skipping: %s", src.name)
+            results.append(Result(kind="mp4tomkv", source_items=[src], output_path=None,
+                                  ok=True, reason="already converted",
+                                  details={"produced": ledger[key]}))
+            continue
+
+        logging.info("Converting to MKV: %s", src.name)
+        produced, why = convert_one_to_mkv(src, dry_run=dry_run, overwrite=overwrite)
+        if produced is None:
+            logging.warning("mp4tomkv failed: %s — %s", src.name, why)
+            results.append(Result(kind="mp4tomkv", source_items=[src], output_path=None,
+                                  ok=False, reason=why))
+            continue
+
+        if dry_run:
+            logging.info("[DRY] Would convert %s -> %s (source kept)", src.name, produced.name)
+            final_name = _predict_converted_final_name(src, is_tv)
+            if final_name:
+                logging.info("[DRY] Final name would be: %s", final_name)
+            results.append(Result(kind="mp4tomkv", source_items=[src], output_path=produced,
+                                  ok=True, reason="dry-run",
+                                  details={"predicted": final_name or produced.name}))
+            continue
+
+        logging.info("Converted -> %s (source kept)", produced.name)
+
+        # Finish the new MKV with the ordinary pipeline. inplace=True keeps it in
+        # this folder if it needs a further remux; the MP4 is untouched either way.
+        try:
+            if is_tv:
+                res = process_tv_file(
+                    produced, root, dry_run=False, overwrite=True,
+                    include_forced_subs=include_forced_subs,
+                    audio_lang_filter=audio_lang_filter, skip_cleantags=skip_cleantags,
+                    force_audio_langs=force_audio_langs, force_sub_langs=force_sub_langs,
+                    inplace=True, backup=False)
+            else:
+                res = process_movie_group(
+                    [produced], root, dry_run=False, overwrite=True,
+                    include_forced_subs=include_forced_subs,
+                    audio_lang_filter=audio_lang_filter, skip_cleantags=skip_cleantags,
+                    force_audio_langs=force_audio_langs, force_sub_langs=force_sub_langs,
+                    inplace=True, backup=False)
+        except Exception as e:
+            logging.exception("Finishing failed for %s", produced.name)
+            results.append(Result(kind="mp4tomkv", source_items=[src], output_path=produced,
+                                  ok=False, reason=f"converted, but finishing failed: {e}"))
+            continue
+
+        final = res.output_path or produced
+        _mp4_ledger_add(key, final.name)
+        results.append(Result(kind="mp4tomkv", source_items=[src], output_path=final,
+                              ok=res.ok, reason=res.reason,
+                              details={**(res.details or {}), "converted_from": src.name}))
+
+    return results
+
 def process_movie_group(
     group: List[Path],
     movies_root: Path,
@@ -6651,6 +7159,10 @@ def main() -> int:
     ap.add_argument("--skip-coverart", action="store_true",
                     help="Disable the automatic cover art embed that runs as the final pipeline step. "
                          "(The standalone --coverart mode is unaffected.)")
+    ap.add_argument("--mp4tomkv", action="store_true",
+                    help="Standalone: remux MP4/M4V files (plus any sidecar .srt) into MKV beside the "
+                         "source, then finish them completely — tag clean, metadata, languages, cover "
+                         "art and rename. Sources are never modified or deleted.")
     ap.add_argument("--no-lang-detect", action="store_true",
                     help="Do not try to identify tracks tagged 'und'. By default a lone unlabelled "
                          "audio track takes the title's original language and unlabelled text "
@@ -6783,6 +7295,7 @@ def main() -> int:
     # Standalone modes are mutually exclusive.
     modes = [m for m, on in (("--cleantags", args.cleantags), ("--coverart", args.coverart),
                              ("--rename", args.rename), ("--subtitles", args.subtitles),
+                             ("--mp4tomkv", args.mp4tomkv),
                              ("--rename-undo", args.rename_undo)) if on]
     if len(modes) > 1:
         logging.error("Invalid arguments: %s are separate modes; run them one at a time.", " and ".join(modes))
@@ -6846,6 +7359,50 @@ def main() -> int:
     else:
         movies_root = CFG.MOVIES_ROOT
         tv_root     = CFG.TV_ROOT
+
+    # --mp4tomkv standalone: convert MP4/M4V to MKV, finish each file, then exit.
+    if args.mp4tomkv:
+        # The finishing chain embeds cover art as its last step, so the shared
+        # cover art context has to be live here too — it is set up further down
+        # for the main pipeline, which this mode returns before reaching.
+        if not args.skip_coverart and not args.dry_run:
+            _PIPELINE_COVERART.update(
+                enabled=True, fetcher=CoverArtFetcher(), ledger=CoverartLedger(),
+                review_dir=(_SCRIPT_DIR / "logs" / "coverart_review" /
+                            _dt.datetime.now().strftime("%Y%m%d_%H%M%S")))
+        mp4_results = run_mp4tomkv_pipeline(
+            do_movies=do_movies,
+            do_tv=do_tv,
+            movies_root=movies_root,
+            tv_root=tv_root,
+            dry_run=args.dry_run,
+            overwrite=args.overwrite,
+            filters=args.filter,
+            include_forced_subs=args.include_forced_subs,
+            audio_lang_filter=audio_lang_filter,
+            skip_cleantags=args.skip_cleantags,
+            force_audio_langs=force_audio_langs,
+            force_sub_langs=force_sub_langs,
+        )
+        ok_mp4 = sum(1 for r in mp4_results if r.ok)
+        bad_mp4 = sum(1 for r in mp4_results if not r.ok)
+        logging.info("mp4tomkv summary: total=%d OK=%d failed=%d", len(mp4_results), ok_mp4, bad_mp4)
+        for r in mp4_results:
+            if not r.ok:
+                logging.warning("- %s | %s", r.source_items[0].name if r.source_items else "?", r.reason)
+        if _PIPELINE_COVERART["enabled"] and not args.dry_run:
+            _PIPELINE_COVERART["ledger"].save()
+            ca = _PIPELINE_COVERART["results"]
+            embedded = sum(1 for r in ca if r.ok and r.details.get("review_image"))
+            if ca:
+                logging.info("Cover art: %d file(s) processed, %d new cover(s) embedded.",
+                             len(ca), embedded)
+            if _PIPELINE_COVERART["review_dir"] and embedded:
+                report = _write_coverart_report(_PIPELINE_COVERART["review_dir"], ca)
+                if report:
+                    logging.info("Cover art review: %s", report)
+        print_results_table("MP4 to MKV", mp4_results)
+        return 0 if bad_mp4 == 0 else 1
 
     # --cleantags standalone: scan roots, clean tags in-place, then exit.
     if args.cleantags:
