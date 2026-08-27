@@ -1680,7 +1680,7 @@ def file_audio_languages(mkv: Path) -> Set[str]:
 
 
 def _report_movie_candidates(src: Path, title: str, year: Optional[str],
-                             candidates: List[Dict[str, Any]], own_langs: Set[str]) -> None:
+                             candidates: List[Dict[str, Any]], own_langs: Set[str]) -> List[int]:
     """
     Print the films a title matched, richest signal first.
 
@@ -1709,6 +1709,7 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
             logging.warning("       %s", c["overview"][:120] + ("..." if len(c["overview"]) > 120 else ""))
     best = next((n for n, c in zip(numbers, candidates) if c.get("imdb")), numbers[0])
     logging.warning("    -> choose one of these with --pick, e.g. --pick %d", best)
+    return numbers
 
 
 def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
@@ -1742,10 +1743,14 @@ def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
         # the strongest hint available, but it only ORDERS the list — the choice
         # stays with the user, because a dubbed release would defeat it.
         candidates = sorted(candidates, key=lambda c: 0 if c.get("lang") in langs else 1)
-        _report_movie_candidates(src, title, year, candidates, langs)
-        summary = "; ".join(f"{c['title']} ({c['year']}) {c.get('imdb') or ''}".strip()
-                            for c in candidates[:3])
-        return None, f"ambiguous title: {len(candidates)} films match — {summary}"
+        numbers = _report_movie_candidates(src, title, year, candidates, langs)
+        # The table is what most people read, and the numbers are the actionable
+        # part — lead with them rather than leaving them only in the log above.
+        listed = "; ".join(
+            f"[{n}] {c['title']} ({c['year']})"
+            + (f" {language_display(c['lang'])}" if c.get("lang") else "")
+            for n, c in list(zip(numbers, candidates))[:4])
+        return None, f"pick one — {listed}"
 
     logging.warning("Cannot identify %s: nothing matches %r (%s).",
                     src.name, title, year or "no year")
@@ -8040,8 +8045,11 @@ def main() -> int:
             srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
             logging.warning("- %s | %s", srcs, r.details["rename_failed"])
 
+    print_results_table("Run results", results)
+
     # Films that could not be identified: save the numbered list so the choice
-    # can be made by number, and show the exact command that applies it.
+    # can be made by number, and show the exact command that applies it. Printed
+    # after the table, because the table is the last thing most people look at.
     _need = write_pending_identity()
     if _need:
         # One suggested number per film — the first candidate that has an id.
@@ -8053,8 +8061,6 @@ def main() -> int:
         logging.warning("%d film(s) need identifying — pick from the numbered list above, "
                         "then rerun:", _need)
         logging.warning("    python MediaCleanup.py --movies --pick %s", _nums or "N")
-
-    print_results_table("Run results", results)
     return 0 if bad == 0 else 1
 
 
