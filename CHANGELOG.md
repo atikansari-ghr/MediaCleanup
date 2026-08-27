@@ -3,6 +3,15 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.8.2] — 2026-08-27
+
+### Added
+- **`--imdb ttNNNNNNN`** — identify the film in scope when its title is too ambiguous to resolve. The run must be narrowed to one film with `--filter`/`--input`, so it cannot stamp one id across a library. The id is written into the file's tags as part of the normal tag pass, so the film identifies itself from then on and never needs the flag again.
+- **The refusal now shows enough to choose from.** Candidates are listed with the language the film was made in, its original title, release date, a one-line synopsis and a direct IMDB link — all of it already present in the search response, so it costs no extra lookups. Candidates whose language matches one the file actually carries are listed **first** and marked, which usually settles it at a glance: a release carrying Kannada audio against three same-titled films, only one of which is Kannada. The match only orders and annotates the list — it never decides, because a dubbed release would defeat it. The exact command to run is printed underneath.
+
+### Fixed
+- **Non-Latin text could kill the worker that logged it.** A Windows console is usually cp1252, and the tool legitimately prints text it cannot encode — a film's original title in Kannada or Telugu, a track name in its own script. That raised `UnicodeEncodeError` inside the logging handler. Unencodable characters are now replaced instead.
+
 ## [1.8.1] — 2026-08-27
 
 ### Fixed

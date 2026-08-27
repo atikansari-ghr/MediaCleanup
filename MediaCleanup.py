@@ -860,6 +860,16 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
+    # A Windows console is usually cp1252, and the tool legitimately prints text
+    # it cannot encode — a film's original title in Kannada or Telugu, a track
+    # name in its own script. Replacing those characters keeps the message
+    # readable; raising would take down the worker that logged it.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     if _RICH_ENABLED and _CONSOLE is not None:
@@ -1437,6 +1447,11 @@ def _normalise_for_match(text: str) -> str:
 # answer overwrites the tags too. The IMDB id is the only unambiguous signal,
 # so it is resolved here and handed to FileBot as a direct lookup.
 
+# Set by --imdb: identifies the single film in scope, for a title too ambiguous
+# to resolve. Applies to whatever the run is scoped to, so the run must be
+# narrowed to one film with --filter/--input.
+_IMDB_OVERRIDE: Optional[str] = None
+
 _MOVIE_IMDB_CACHE: Dict[str, Tuple[Optional[str], List[Tuple[str, str]]]] = {}
 _MOVIE_IMDB_LOCK = threading.Lock()
 
@@ -1528,8 +1543,17 @@ def resolve_movie_imdb_id(title: str, year: Optional[str]
             ids = _http_get_json(f"https://api.themoviedb.org/3/movie/{r.get('id')}"
                                  f"/external_ids?api_key={CFG.TMDB_API_KEY}") or {}
             tt = str(ids.get("imdb_id") or "").strip()
-            label = f"{r.get('title') or '?'} ({str(r.get('release_date') or '')[:4]})"
-            candidates.append((label, tt if re.fullmatch(r"tt\d{7,10}", tt) else ""))
+            iso1 = str(r.get("original_language") or "").strip()
+            candidates.append({
+                "title": str(r.get("title") or "?"),
+                "year": str(r.get("release_date") or "")[:4],
+                "released": str(r.get("release_date") or ""),
+                "imdb": tt if re.fullmatch(r"tt\d{7,10}", tt) else "",
+                "tmdb": r.get("id"),
+                "lang": resolve_language(iso1) if iso1 else None,
+                "original_title": str(r.get("original_title") or ""),
+                "overview": " ".join(str(r.get("overview") or "").split()),
+            })
 
         if chosen and chosen.get("id"):
             data = _http_get_json(
@@ -1549,14 +1573,71 @@ def resolve_movie_imdb_id(title: str, year: Optional[str]
     return imdb_id, candidates
 
 
+def file_audio_languages(mkv: Path) -> Set[str]:
+    """Canonical languages of a file's audio tracks, for narrowing candidates."""
+    try:
+        tracks = extract_tracks(mkv, mkvmerge_identify_json(mkv))
+    except Exception:
+        return set()
+    langs: Set[str] = set()
+    for t in tracks:
+        if t.type != "audio":
+            continue
+        raw = (t.language or "").lower()
+        canon = resolve_language(raw) if raw and raw != "und" else detect_language_canonical(t)
+        if canon:
+            langs.add(canon)
+    return langs
+
+
+def _report_movie_candidates(src: Path, title: str, year: Optional[str],
+                             candidates: List[Dict[str, Any]], own_langs: Set[str]) -> None:
+    """
+    Print the films a title matched, richest signal first.
+
+    A list of names cannot be chosen between — two films share a title and a
+    year often enough that it happens on an ordinary library. Everything shown
+    here already came back with the search, so it costs nothing extra: the
+    language a film was made in usually settles it on its own, especially when
+    it matches a language the file itself carries.
+    """
+    logging.warning("Cannot identify %s — %d films match %r (%s).",
+                    src.name, len(candidates), title, year or "no year")
+    if own_langs:
+        logging.warning("    This file's audio: %s",
+                        ", ".join(sorted(language_display(c) for c in own_langs)))
+    for i, c in enumerate(candidates, 1):
+        hit = " <- matches this file's audio" if c.get("lang") in own_langs else ""
+        logging.warning("    %d. %s (%s)  %s%s", i, c["title"], c["year"] or "?",
+                        language_display(c["lang"]) if c.get("lang") else "language unknown", hit)
+        link = (f"https://www.imdb.com/title/{c['imdb']}/" if c.get("imdb")
+                else f"https://www.themoviedb.org/movie/{c.get('tmdb')}")
+        logging.warning("       %-12s %s", c.get("imdb") or "(no IMDB id)", link)
+        if c.get("original_title") and _match_key(c["original_title"]) != _match_key(c["title"]):
+            logging.warning("       original title: %s", c["original_title"])
+        if c.get("overview"):
+            logging.warning("       %s", c["overview"][:120] + ("..." if len(c["overview"]) > 120 else ""))
+    best = next((c for c in candidates if c.get("imdb")), None)
+    logging.warning("    Choose one, then either rerun scoped to this file with its id:")
+    logging.warning("        python MediaCleanup.py --movies --filter %r --imdb %s",
+                    src.stem[:24] + "*", (best or {}).get("imdb") or "tt1234567")
+    logging.warning("    or put the id in the filename (e.g. '%s (%s).%s.mkv') and rerun.",
+                    title, year or "YYYY", (best or {}).get("imdb") or "tt1234567")
+
+
 def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
-                              known_imdb: Optional[str]) -> Tuple[Optional[str], str]:
+                              known_imdb: Optional[str],
+                              own_langs: Optional[Set[str]] = None) -> Tuple[Optional[str], str]:
     """
     The IMDB id to pin this film's rename to, or a reason it cannot be renamed.
 
     An id already carried by the filename, folder or tags is trusted as-is —
     it costs nothing and is exactly what a previous run established.
     """
+    if _IMDB_OVERRIDE:
+        logging.info("Using the IMDB id given on the command line for %s: %s",
+                     src.name, _IMDB_OVERRIDE)
+        return _IMDB_OVERRIDE, ""
     if known_imdb and re.fullmatch(r"tt\d{7,10}", known_imdb):
         logging.debug("Using IMDB id from the file itself: %s", known_imdb)
         return known_imdb, ""
@@ -1566,15 +1647,17 @@ def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
         return imdb_id, ""
 
     if candidates:
-        shown = "; ".join(f"{label} {tt}".strip() for label, tt in candidates[:5])
-        more = f" and {len(candidates) - 5} more" if len(candidates) > 5 else ""
-        logging.warning("Cannot identify %s: %d films match %r (%s) — %s%s",
-                        src.name, len(candidates), title, year or "no year", shown, more)
-        logging.warning("    Add the correct IMDB id to the filename "
-                        "(e.g. '%s (%s).tt1234567.mkv') and run again.", title, year or "YYYY")
-        return None, f"ambiguous title: {len(candidates)} films match — {shown}{more}"
+        langs = own_langs if own_langs is not None else file_audio_languages(src)
+        # Films made in a language this file actually carries come first: that is
+        # the strongest hint available, but it only ORDERS the list — the choice
+        # stays with the user, because a dubbed release would defeat it.
+        candidates = sorted(candidates, key=lambda c: 0 if c.get("lang") in langs else 1)
+        _report_movie_candidates(src, title, year, candidates, langs)
+        summary = "; ".join(f"{c['title']} ({c['year']}) {c.get('imdb') or ''}".strip()
+                            for c in candidates[:3])
+        return None, f"ambiguous title: {len(candidates)} films match — {summary}"
 
-    logging.warning("Cannot identify %s: nothing on TMDB matches %r (%s).",
+    logging.warning("Cannot identify %s: nothing matches %r (%s).",
                     src.name, title, year or "no year")
     return None, f"no film matches {title!r} ({year or 'no year'})"
 
@@ -7362,6 +7445,10 @@ def main() -> int:
     ap.add_argument("--skip-coverart", action="store_true",
                     help="Disable the automatic cover art embed that runs as the final pipeline step. "
                          "(The standalone --coverart mode is unaffected.)")
+    ap.add_argument("--imdb", metavar="ttNNNNNNN", default=None,
+                    help="Identify the film in scope as this IMDB id, for a title the tool refuses "
+                         "to guess between. Scope the run to one film with --filter/--input; the id "
+                         "is written into the file's tags, so later runs need it only once.")
     ap.add_argument("--mp4tomkv", action="store_true",
                     help="Standalone: remux MP4/M4V files (plus any sidecar .srt) into MKV beside the "
                          "source, then finish them completely — tag clean, metadata, languages, cover "
@@ -7416,6 +7503,23 @@ def main() -> int:
         logging.error("%s", e)
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
+
+    # --imdb identifies ONE film, so the run must be narrowed to one. Applying it
+    # to a whole library would stamp the same id onto every file in it.
+    if args.imdb:
+        if not re.fullmatch(r"tt\d{7,10}", args.imdb.strip()):
+            logging.error("--imdb must be an IMDB id like tt1234567, got %r", args.imdb)
+            return 2
+        if not (args.filter or args.input):
+            logging.error("--imdb identifies a single film — scope the run with --filter or --input "
+                          "so it cannot be applied to your whole library.")
+            return 2
+        if args.tv:
+            logging.error("--imdb applies to films, not TV episodes.")
+            return 2
+        global _IMDB_OVERRIDE
+        _IMDB_OVERRIDE = args.imdb.strip()
+        logging.info("Films in scope will be identified as %s.", _IMDB_OVERRIDE)
 
     if args.no_lang_detect and CFG.DETECT_UNDETERMINED_LANGS:
         CFG = dataclasses.replace(CFG, DETECT_UNDETERMINED_LANGS=False)

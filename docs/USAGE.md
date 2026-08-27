@@ -80,6 +80,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
 | `--force-video-lang LANG` | Stamp the **video** track with this language instead of the title's TMDB original language. Accepts any supported language, not just targets. |
+| `--imdb ttNNNNNNN` | Identify the film in scope as this IMDB id, when the title is too ambiguous to resolve. Requires `--filter` or `--input` so it applies to one film. The id is written into the file's tags, so it is only ever needed once. |
 | `--no-lang-detect` | Do not try to identify tracks tagged `und` (see [Releases with no language tags](#releases-with-no-language-tags)). Config equivalent: `[languages] detect_undetermined = false`. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
 | `--skip-coverart` | Disable the automatic cover art embed at the end of the pipeline. |
@@ -373,16 +374,39 @@ The cover is a standard Matroska attachment named `cover.jpg`. Some players cach
 
 **A film left unrenamed, reported `PARTIAL`**
 
-A title and a year do not identify a film — a dozen releases can share both. Rather than let the database's ranking decide, the tool resolves each film to a single IMDB id first, and when it cannot, it leaves the file alone:
+A title and a year do not identify a film — several releases can share both. Rather than let the database's ranking decide, the tool resolves each film to a single IMDB id first, and when it cannot, it leaves the file alone and shows you what it found:
 
 ```
-Cannot identify The.Film.2026.1080p...mkv: 3 films match 'The Film' (2026) —
-  The Film: A Longer Subtitle (2026) tt1111111; The Film Returns (2026);
-  The Film Chronicles (2026) tt2222222
-    Add the correct IMDB id to the filename and run again.
+Cannot identify The.Film.2026...mkv — 3 films match 'The Film' (2026).
+    This file's audio: Hindi, Kannada, Tamil, Telugu
+    1. The Film: A Longer Subtitle (2026)  Kannada <- matches this file's audio
+       tt1111111    https://www.imdb.com/title/tt1111111/
+       original title: <in its own script>
+       A powerful drug cartel pulls the strings behind a facade of sun-soaked...
+    2. The Film Returns (2026)  English
+       (no IMDB id) https://www.themoviedb.org/movie/123456
+       What happens when a community's coastline becomes a dumping ground...
+    Choose one, then either rerun scoped to this file with its id:
+        python MediaCleanup.py --movies --filter 'The.Film.2026*' --imdb tt1111111
+    or put the id in the filename (e.g. 'The Film (2026).tt1111111.mkv') and rerun.
 ```
 
-Pick the right one and put its id in the name — `The Film (2026).tt1111111.mkv` — and the next run is pinned to it exactly, with no search at all. Any id already in the filename, a parent folder, or the file's own tags is used automatically, so a file that has been through the pipeline once never needs this again.
+**Choosing.** The language a film was made in usually settles it, so candidates whose language matches one your file actually carries are listed first and marked. That ordering is a hint only — it never picks for you, because a dubbed release would defeat it.
+
+**Selecting.** Two ways, both permanent after the first run:
+
+```bash
+python MediaCleanup.py --movies --filter "The.Film.2026*" --imdb tt1111111
+```
+
+or rename the file to carry the id and run normally. Any of these shapes work, and none of them disturb title parsing:
+
+```
+The Film (2026).tt1111111.mkv          The Film 2026 [tt1111111].mkv
+The Film.2026.tt1111111.1080p.mkv      The Film (2026) - tt1111111ile.mkv
+```
+
+Either way the id is written into the file's Matroska tags during the tag pass, so the film identifies itself on every later run — `--imdb` is needed once, never again. An id already in the filename, a parent folder or the tags is always used as-is, with no lookup at all.
 
 **Renamed as a different, similarly-named show**
 
