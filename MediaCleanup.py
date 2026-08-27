@@ -1429,6 +1429,156 @@ def _normalise_for_match(text: str) -> str:
     return "".join(ch for ch in (text or "") if ch.isalnum()).lower()
 
 
+
+# --- Movie identity: pin the rename to one film, or refuse ------------------
+# A title search alone cannot identify a film. A common one-word title can
+# match a dozen releases of the same year, and the year filter excludes none, so
+# whichever the database happens to rank first wins — silently, and the wrong
+# answer overwrites the tags too. The IMDB id is the only unambiguous signal,
+# so it is resolved here and handed to FileBot as a direct lookup.
+
+_MOVIE_IMDB_CACHE: Dict[str, Tuple[Optional[str], List[Tuple[str, str]]]] = {}
+_MOVIE_IMDB_LOCK = threading.Lock()
+
+
+def _match_key(text: str) -> str:
+    """
+    Letters and digits only, lowercased, with '&' spelled out.
+
+    Databases and release names disagree on the ampersand ('A & B' vs
+    'A.And.B'), and on every kind of punctuation, so both are removed
+    from the comparison rather than allowed to defeat it.
+    """
+    return "".join(ch for ch in (text or "").lower().replace("&", " and ") if ch.isalnum())
+
+
+def _title_prefix_matches(candidate: str, query: str) -> bool:
+    """
+    True when a database title begins with the title we inferred, at a word
+    boundary. A film's real title is often longer than the release name
+    ('The Film' -> 'The Film: A Longer Subtitle'), so an exact comparison is
+    wrong here — but the boundary keeps 'The Filmmaker' from matching 'The Film'.
+    """
+    q, c = _match_key(query), _match_key(candidate)
+    if not q or not c.startswith(q):
+        return False
+    if c == q:
+        return True
+    # Walk the original title until the matched run ends; the next character
+    # decides whether the query landed on a word or inside one.
+    seen = 0
+    for ch in (candidate or "").lower().replace("&", " and "):
+        if ch.isalnum():
+            seen += 1
+        elif seen >= len(q):
+            return True
+        if seen == len(q):
+            continue
+        if seen > len(q):
+            return False
+    return seen == len(q)
+
+
+def resolve_movie_imdb_id(title: str, year: Optional[str]
+                           ) -> Tuple[Optional[str], List[Tuple[str, str]]]:
+    """
+    Resolve a film to one IMDB id, or report why it could not be.
+
+    Returns (imdb_id, candidates). imdb_id is set only when exactly one film
+    survives; otherwise it is None and candidates lists what remained, so the
+    caller can show the user what to choose between instead of guessing.
+    """
+    if not CFG.TMDB_API_KEY or not title:
+        return None, []
+    key = f"{title.strip().lower()}|{year or ''}"
+    with _MOVIE_IMDB_LOCK:
+        if key in _MOVIE_IMDB_CACHE:
+            return _MOVIE_IMDB_CACHE[key]
+
+    imdb_id: Optional[str] = None
+    candidates: List[Tuple[str, str]] = []
+    try:
+        url = (f"https://api.themoviedb.org/3/search/movie?api_key={CFG.TMDB_API_KEY}"
+               f"&query={urllib.parse.quote(title)}")
+        if year:
+            url += f"&year={year}"
+        results = (_http_get_json(url) or {}).get("results") or []
+
+        # Year first: it is a hard constraint, not a ranking hint.
+        if year and str(year).isdigit():
+            want = int(year)
+            in_year = []
+            for r in results:
+                ry = str(r.get("release_date") or "")[:4]
+                if ry.isdigit() and abs(int(ry) - want) <= 1:
+                    in_year.append(r)
+            results = in_year
+
+        exact = [r for r in results
+                 if _match_key(r.get("title")) == _match_key(title)
+                 or _match_key(r.get("original_title")) == _match_key(title)]
+        prefix = [r for r in results if _title_prefix_matches(str(r.get("title") or ""), title)]
+
+        chosen = exact[0] if len(exact) == 1 else (prefix[0] if len(prefix) == 1 else None)
+        pool = exact if len(exact) > 1 else prefix
+        # Carry each candidate's IMDB id: two films can share a title AND a year,
+        # so a list of names alone would not tell the user which to pick.
+        candidates = []
+        for r in pool[:5]:
+            ids = _http_get_json(f"https://api.themoviedb.org/3/movie/{r.get('id')}"
+                                 f"/external_ids?api_key={CFG.TMDB_API_KEY}") or {}
+            tt = str(ids.get("imdb_id") or "").strip()
+            label = f"{r.get('title') or '?'} ({str(r.get('release_date') or '')[:4]})"
+            candidates.append((label, tt if re.fullmatch(r"tt\d{7,10}", tt) else ""))
+
+        if chosen and chosen.get("id"):
+            data = _http_get_json(
+                f"https://api.themoviedb.org/3/movie/{chosen['id']}/external_ids"
+                f"?api_key={CFG.TMDB_API_KEY}")
+            got = str((data or {}).get("imdb_id") or "").strip()
+            if re.fullmatch(r"tt\d{7,10}", got):
+                imdb_id = got
+                candidates = []
+                logging.info("Identified %r (%s) as %s — %s", title, year or "no year",
+                             chosen.get("title"), imdb_id)
+    except Exception as e:
+        logging.debug("Movie identity lookup failed for %r (%s): %s", title, year, e)
+
+    with _MOVIE_IMDB_LOCK:
+        _MOVIE_IMDB_CACHE[key] = (imdb_id, candidates)
+    return imdb_id, candidates
+
+
+def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
+                              known_imdb: Optional[str]) -> Tuple[Optional[str], str]:
+    """
+    The IMDB id to pin this film's rename to, or a reason it cannot be renamed.
+
+    An id already carried by the filename, folder or tags is trusted as-is —
+    it costs nothing and is exactly what a previous run established.
+    """
+    if known_imdb and re.fullmatch(r"tt\d{7,10}", known_imdb):
+        logging.debug("Using IMDB id from the file itself: %s", known_imdb)
+        return known_imdb, ""
+
+    imdb_id, candidates = resolve_movie_imdb_id(title, year)
+    if imdb_id:
+        return imdb_id, ""
+
+    if candidates:
+        shown = "; ".join(f"{label} {tt}".strip() for label, tt in candidates[:5])
+        more = f" and {len(candidates) - 5} more" if len(candidates) > 5 else ""
+        logging.warning("Cannot identify %s: %d films match %r (%s) — %s%s",
+                        src.name, len(candidates), title, year or "no year", shown, more)
+        logging.warning("    Add the correct IMDB id to the filename "
+                        "(e.g. '%s (%s).tt1234567.mkv') and run again.", title, year or "YYYY")
+        return None, f"ambiguous title: {len(candidates)} films match — {shown}{more}"
+
+    logging.warning("Cannot identify %s: nothing on TMDB matches %r (%s).",
+                    src.name, title, year or "no year")
+    return None, f"no film matches {title!r} ({year or 'no year'})"
+
+
 def _filebot_series_name_filter(year_filter: List[str], show: str, db: str) -> List[str]:
     """
     Extend a FileBot --filter so the matched SERIES must be the one we asked for.
@@ -1501,6 +1651,7 @@ def run_filebot_rename_final_mkv(
     filebot_format: str,
     dry_run: bool,
     query: Optional[str] = None,
+    imdb_id: Optional[str] = None,
     outcome: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
@@ -1564,17 +1715,24 @@ def run_filebot_rename_final_mkv(
 
     # Override FileBot's filename-based search with a clean title so junk
     # in the original filename doesn't corrupt the DB lookup result.
-    # The name constraint goes only on the attempt that carries our query. The
-    # later "retry without query" exists for when our inferred title is wrong,
-    # so constraining it by that same title would defeat it.
-    match_filter = _filebot_series_name_filter(year_filter, search_q or "", db)
-    cmd = base_cmd + (["--q", search_q] if search_q else []) + match_filter
-    if search_q:
-        logging.debug("FileBot query override: %s", search_q)
+    # An IMDB id identifies the title outright: FileBot resolves 'ttNNNNNNN' as a
+    # direct lookup rather than a search, so no filter and no fallback can apply
+    # — and none should, since a fallback could only substitute a different film.
+    pinned = bool(imdb_id) and not is_tv_db
+    if pinned:
+        logging.debug("FileBot pinned to %s: %s", imdb_id, mkv.name)
+        r = run_cmd(base_cmd + ["--q", str(imdb_id)], timeout_sec=1200)
+    else:
+        # The name constraint goes only on the attempt that carries our query. The
+        # later "retry without query" exists for when our inferred title is wrong,
+        # so constraining it by that same title would defeat it.
+        match_filter = _filebot_series_name_filter(year_filter, search_q or "", db)
+        cmd = base_cmd + (["--q", search_q] if search_q else []) + match_filter
+        if search_q:
+            logging.debug("FileBot query override: %s", search_q)
+        r = run_cmd(cmd, timeout_sec=1200)
 
-    r = run_cmd(cmd, timeout_sec=1200)
-
-    if not r.ok and mkv.exists():
+    if not r.ok and not pinned and mkv.exists():
         tmdb_cmd = (_filebot_tmdb_tv_cmd(base_cmd, search_q or "", show_year)
                     if is_tv_db and search_q else None)
         if tmdb_cmd:
@@ -3624,11 +3782,21 @@ def _cleantags_one(
             db    = CFG.FILEBOT_DB
             fmt   = MOVIE_FILEBOT_FORMAT
 
+        # A film must be pinned to one IMDB id before it may be renamed; several
+        # releases can share a title and a year, and the wrong pick rewrites tags.
+        pinned_imdb: Optional[str] = None
+        blocked_reason = ""
+        if not is_tv:
+            pinned_imdb, blocked_reason = movie_identity_for_rename(
+                mkv_path, title or mkv_path.stem, year, imdb_id)
+
         filebot_ok = False
-        if CFG.FILEBOT_EXE.exists() and not _FILEBOT_DISABLED:
+        if not is_tv and not pinned_imdb:
+            logging.warning("cleantags: leaving %s unrenamed — %s", mkv_path.name, blocked_reason)
+        elif CFG.FILEBOT_EXE.exists() and not _FILEBOT_DISABLED:
             logging.info("cleantags FileBot rename: %s  (query=%s)", mkv_path.name, query)
             fb = run_filebot_rename_final_mkv(mkv_path, db=db, filebot_format=fmt,
-                                              dry_run=False, query=query)
+                                              dry_run=False, query=query, imdb_id=pinned_imdb)
             if fb and fb.exists() and fb != mkv_path:
                 logging.info("cleantags FileBot renamed -> %s", fb.name)
                 current    = fb
@@ -5000,6 +5168,14 @@ def process_rename_one(
             query = f"{title} ({year})" if title and year else (title or None)
             db = CFG.FILEBOT_DB
             fmt = MOVIE_FILEBOT_FORMAT_DIR if target_root else MOVIE_FILEBOT_FORMAT
+            if not _imdb:
+                _imdb = extract_imdb_id_from_movie_path(mkv) or extract_imdb_from_mkv_tags(mkv)
+            # A film must be pinned to one id before it may be renamed — a title
+            # and a year are shared by too many releases to identify one.
+            pinned_imdb, blocked = movie_identity_for_rename(mkv, title or mkv.stem, year, _imdb)
+            if not pinned_imdb:
+                return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                              reason=blocked)
 
         out_dir = target_root if target_root else mkv.parent
         action = "test" if dry_run else "move"
@@ -5027,7 +5203,11 @@ def process_rename_one(
         plain_cmd = list(cmd)
         year_filter = _filebot_year_filter(query, db, year=tv_year if is_tv else year)
         base_cmd = plain_cmd + year_filter
-        if query:
+        if not is_tv:
+            # Direct lookup by id: no filter can improve on it, and no fallback
+            # should apply, since a fallback could only find a different film.
+            cmd += ["--q", str(pinned_imdb)]
+        elif query:
             cmd += ["--q", query]
             cmd += _filebot_series_name_filter(year_filter, query, db)
         else:
@@ -5040,7 +5220,7 @@ def process_rename_one(
         def _matched(res: CmdResult, text: str) -> bool:
             return ("[TEST]" in text or "skipped" in text.lower()) if dry_run else res.ok
 
-        if not _matched(r, out_txt) and mkv.exists():
+        if not _matched(r, out_txt) and is_tv and mkv.exists():
             tmdb_cmd = (_filebot_tmdb_tv_cmd(plain_cmd, query or "", tv_year)
                         if is_tv and query else None)
             if tmdb_cmd:
@@ -6270,6 +6450,29 @@ def run_mp4tomkv_pipeline(
 
     return results
 
+def rename_movie_when_identified(src_file: Path, movie_title: str, movie_name: str,
+                                 year: Optional[str], imdb_id: Optional[str],
+                                 outcome: Dict[str, Any]) -> Optional[Path]:
+    """
+    Rename a film only once it is pinned to a single IMDB id.
+
+    A title search cannot identify a film on its own — several releases share a
+    name and a year — so when the id cannot be established the file is left
+    alone and the reason recorded, rather than renamed to whichever film the
+    database ranked first. That rename would also overwrite the tags, and a
+    later run would then trust the wrong id.
+    """
+    pinned, blocked = movie_identity_for_rename(src_file, movie_name, year, imdb_id)
+    if not pinned:
+        outcome["ok"] = False
+        outcome["reason"] = blocked
+        return None
+    return run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
+                                        filebot_format=MOVIE_FILEBOT_FORMAT,
+                                        dry_run=False, query=movie_title,
+                                        imdb_id=pinned, outcome=outcome)
+
+
 def process_movie_group(
     group: List[Path],
     movies_root: Path,
@@ -6377,11 +6580,20 @@ def process_movie_group(
         # nothing about the database rename that follows. Predict the real one.
         predicted_name: Optional[str] = None
         if dry_run:
-            predicted_name = predict_movie_final_name(
-                best_video_file, movie_name, year, imdb_id, res_tag, source_tag,
-                codec_tag, selected_audio_langs, exact=_PREVIEW_EXACT)
-            if predicted_name:
-                logging.info("[DRY] Final name would be: %s", predicted_name)
+            # Preview the identification too: a film the real run would refuse
+            # to rename must not be previewed as though it had a name.
+            _pinned, _blocked = movie_identity_for_rename(group[0], movie_name, year, imdb_id)
+            if not _pinned:
+                logging.warning("[DRY] Would NOT rename %s — %s", group[0].name, _blocked)
+                predicted_name = None
+                _rename_outcome["ok"] = False
+                _rename_outcome["reason"] = _blocked
+            else:
+                predicted_name = predict_movie_final_name(
+                    best_video_file, movie_name, year, _pinned, res_tag, source_tag,
+                    codec_tag, selected_audio_langs, exact=_PREVIEW_EXACT)
+                if predicted_name:
+                    logging.info("[DRY] Final name would be: %s", predicted_name)
 
         # ── SKIP-REMUX / RULE-7 CHECKS (single-file groups only) ─────────────
         if len(group) == 1:
@@ -6402,10 +6614,8 @@ def process_movie_group(
                         ct = clean_mkv_tags(src_file, dry_run=False)
                         if not ct.ok:
                             logging.warning("Auto-cleantags failed (non-fatal): %s", ct.reason)
-                    fb_path = run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
-                                                           filebot_format=MOVIE_FILEBOT_FORMAT,
-                                                           dry_run=False, query=movie_title,
-                                                           outcome=_rename_outcome)
+                    fb_path = rename_movie_when_identified(src_file, movie_title, movie_name, year,
+                                                                 imdb_id, _rename_outcome)
                     if fb_path and fb_path.exists() and fb_path != src_file:
                         out_done = fb_path
                     if not skip_cleantags and CFG.MKVPROPEDIT_EXE.exists() and out_done.exists():
@@ -6434,10 +6644,8 @@ def process_movie_group(
                         if not ct.ok:
                             logging.warning("Auto-cleantags (pre-FileBot) failed (non-fatal): %s", ct.reason)
                     logging.info("FileBot identify+rename (in-place): %s", src_file.name)
-                    fb_path = run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
-                                                           filebot_format=MOVIE_FILEBOT_FORMAT,
-                                                           dry_run=False, query=movie_title,
-                                                           outcome=_rename_outcome)
+                    fb_path = rename_movie_when_identified(src_file, movie_title, movie_name, year,
+                                                                 imdb_id, _rename_outcome)
                     if fb_path and fb_path.exists() and fb_path != src_file:
                         logging.info("FileBot renamed -> %s", fb_path.name)
                         out_done = fb_path
@@ -6590,13 +6798,8 @@ def process_movie_group(
 
             # Step 2: FileBot rename — identify movie via DB and apply canonical filename.
             logging.info("FileBot identify+rename: %s", out_done.name)
-            fb_path = run_filebot_rename_final_mkv(
-                out_done,
-                db=CFG.FILEBOT_DB,
-                filebot_format=MOVIE_FILEBOT_FORMAT,
-                dry_run=dry_run,
-                query=movie_title,
-            )
+            fb_path = rename_movie_when_identified(out_done, movie_title, movie_name,
+                                                   year, imdb_id, _rename_outcome)
             if fb_path and fb_path.exists() and fb_path != out_done:
                 logging.info("FileBot renamed -> %s", fb_path.name)
                 out_done = fb_path
@@ -6613,8 +6816,8 @@ def process_movie_group(
         pipeline_embed_cover(out_done, is_tv=False, dry_run=dry_run)
 
         return Result(kind=kind, source_items=group, output_path=out_done, ok=True,
-                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs,
-                               "predicted": predicted_name})
+                      details=_with_rename_outcome({"cmd": r.cmd, "audio_langs": selected_audio_langs,
+                                                    "predicted": predicted_name}, _rename_outcome))
 
     except FileExistsError as e:
         return Result(kind=kind, source_items=group, output_path=None, ok=False, reason=str(e))

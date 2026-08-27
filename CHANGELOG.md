@@ -3,6 +3,15 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] — 2026-08-27
+
+### Fixed
+- **A film could be renamed as a completely different film, discarding a correct IMDB id it already had.** A file whose name already carried the right id was renamed to an unrelated film with a similar title, and its tags overwritten with that film's genre, director and cast. Three faults combined:
+  - **The IMDB id was known and never used.** The dry-run preview read it and predicted correctly; the rename passed only the title to the database. The id is now passed as a direct lookup (`--q ttNNNNNNN`), which resolves the film outright — no search, and no fallback that could substitute another title.
+  - **The year filter could not disambiguate.** A one-word title plus a year matched a dozen films, all released inside the `y >= Y-1 && y <= Y+1` window, so the database's own ranking decided which one won. Films are now resolved to a single id before any rename: the year as a hard constraint, then an exact title match, then a title the database merely extends at a word boundary (`The Film` → `The Film: A Longer Subtitle`, but never `The Filmmaker`). Ampersands are matched through, so `A & B` still matches `A.And.B`.
+  - **Ambiguity was resolved by guessing.** When more than one film survives, the file is now left **unrenamed** and reported as `PARTIAL`, listing each candidate with its IMDB id so the id can be added to the filename and the next run pinned exactly. A wrong rename is worse than none, because it also rewrites the tags and a later run then trusts the wrong id.
+- Applies to every path that renames a film — the remux and skip-remux pipelines, the standalone `--rename` mode, and `--cleantags`. The dry run reports the same refusal, so the preview still matches what a real run does.
+
 ## [1.8.0] — 2026-08-25
 
 ### Added

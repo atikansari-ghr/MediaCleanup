@@ -371,6 +371,19 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
 
+**A film left unrenamed, reported `PARTIAL`**
+
+A title and a year do not identify a film — a dozen releases can share both. Rather than let the database's ranking decide, the tool resolves each film to a single IMDB id first, and when it cannot, it leaves the file alone:
+
+```
+Cannot identify The.Film.2026.1080p...mkv: 3 films match 'The Film' (2026) —
+  The Film: A Longer Subtitle (2026) tt1111111; The Film Returns (2026);
+  The Film Chronicles (2026) tt2222222
+    Add the correct IMDB id to the filename and run again.
+```
+
+Pick the right one and put its id in the name — `The Film (2026).tt1111111.mkv` — and the next run is pinned to it exactly, with no search at all. Any id already in the filename, a parent folder, or the file's own tags is used automatically, so a file that has been through the pipeline once never needs this again.
+
 **Renamed as a different, similarly-named show**
 
 A query for `Show Name` can be answered by `Show Name Extended` — same year, so the year constraint cannot tell them apart. The lookup now requires the matched series name to be the one asked for, so a longer name that merely contains it is dropped and the show is resolved through TMDB by exact title instead. If two series share a name exactly and the filename carries no year, nothing is guessed: the file is left unrenamed and reported `PARTIAL`.
