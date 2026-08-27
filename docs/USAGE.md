@@ -80,6 +80,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
 | `--force-video-lang LANG` | Stamp the **video** track with this language instead of the title's TMDB original language. Accepts any supported language, not just targets. |
+| `--pick N [N …]` | Identify films by the numbers shown in the previous run's candidate list, e.g. `--pick 1 3`. One number per film; several films can be resolved in one command. |
 | `--imdb ttNNNNNNN` | Identify the film in scope as this IMDB id, when the title is too ambiguous to resolve. Requires `--filter` or `--input` so it applies to one film. The id is written into the file's tags, so it is only ever needed once. |
 | `--no-lang-detect` | Do not try to identify tracks tagged `und` (see [Releases with no language tags](#releases-with-no-language-tags)). Config equivalent: `[languages] detect_undetermined = false`. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
@@ -393,20 +394,41 @@ Cannot identify The.Film.2026...mkv — 3 films match 'The Film' (2026).
 
 **Choosing.** The language a film was made in usually settles it, so candidates whose language matches one your file actually carries are listed first and marked. That ordering is a hint only — it never picks for you, because a dubbed release would defeat it.
 
-**Selecting.** Two ways, both permanent after the first run:
+**Selecting by number.** Every candidate in a run is numbered, and the summary ends with a command you can run as-is:
+
+```
+2 film(s) need identifying — pick from the numbered list above, then rerun:
+    python MediaCleanup.py --movies --pick 1 3
+```
+
+One number per film, and several films can be resolved in a single run:
+
+```bash
+python MediaCleanup.py --movies --pick 2 3
+```
+
+```
+Pick 2: Another Film (2022) -> tt2222222
+Pick 3: The Film: A Longer Subtitle (2026) -> tt1111111
+Identifying 2 film(s) from your picks.
+```
+
+The numbers come from `logs\pending_identity.csv`, written by the run that listed them and read back verbatim — never recomputed, so a number always means the film you were shown. The file is rewritten each run and deleted once nothing is outstanding, so **always pick from the most recent listing**.
+
+Bad picks are refused rather than guessed at: a number that isn't in the list, one whose candidate has no IMDB id, two numbers for the same film, or `--pick` with no saved list all stop the run with an explanation.
+
+**Selecting by id.** If you already know the id, skip the preview:
 
 ```bash
 python MediaCleanup.py --movies --filter "The.Film.2026*" --imdb tt1111111
 ```
 
-or rename the file to carry the id and run normally. Any of these shapes work, and none of them disturb title parsing:
+Either way the id is written into the file's Matroska tags during the tag pass, so the film identifies itself on every later run — you choose once, never again. An id already in the filename, a parent folder or the tags is always used as-is, with no lookup at all. These filename shapes all work and none disturb title parsing:
 
 ```
 The Film (2026).tt1111111.mkv          The Film 2026 [tt1111111].mkv
 The Film.2026.tt1111111.1080p.mkv      The Film (2026) - tt1111111ile.mkv
 ```
-
-Either way the id is written into the file's Matroska tags during the tag pass, so the film identifies itself on every later run — `--imdb` is needed once, never again. An id already in the filename, a parent folder or the tags is always used as-is, with no lookup at all.
 
 **Renamed as a different, similarly-named show**
 

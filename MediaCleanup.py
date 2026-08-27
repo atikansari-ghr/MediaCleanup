@@ -1452,6 +1452,95 @@ def _normalise_for_match(text: str) -> str:
 # narrowed to one film with --filter/--input.
 _IMDB_OVERRIDE: Optional[str] = None
 
+# Films a run could not identify, numbered so the choice can be made by number
+# instead of by pasting an id. The numbers are WRITTEN DOWN and read back rather
+# than recomputed: a later search could rank differently, and then the same
+# number would silently mean a different film.
+PENDING_IDENTITY_CSV = _SCRIPT_DIR / "logs" / "pending_identity.csv"
+_PENDING_IDENTITY: List[Dict[str, Any]] = []
+_PENDING_LOCK = threading.Lock()
+# Populated from that file by --pick: 'title|year' -> imdb id.
+_PICK_SELECTION: Dict[str, str] = {}
+
+
+def _pending_key(title: str, year: Optional[str]) -> str:
+    """Identify a pending film by what was searched for, not by path — the file
+    that finally gets renamed may be a remux output living somewhere else."""
+    return f"{(title or '').strip().lower()}|{year or ''}"
+
+
+def _register_pending_candidates(src: Path, title: str, year: Optional[str],
+                                 candidates: List[Dict[str, Any]]) -> List[int]:
+    """Record this film's candidates and return the number shown against each."""
+    with _PENDING_LOCK:
+        first = len(_PENDING_IDENTITY) + 1
+        for c in candidates:
+            _PENDING_IDENTITY.append({
+                "n": len(_PENDING_IDENTITY) + 1,
+                "key": _pending_key(title, year),
+                "file": src.name,
+                "imdb": c.get("imdb") or "",
+                "title": c.get("title") or "",
+                "year": c.get("year") or "",
+            })
+        return list(range(first, first + len(candidates)))
+
+
+def write_pending_identity() -> int:
+    """Persist the numbered candidate list; returns how many films need a choice."""
+    if not _PENDING_IDENTITY:
+        try:
+            PENDING_IDENTITY_CSV.unlink(missing_ok=True)   # nothing outstanding
+        except OSError:
+            pass
+        return 0
+    try:
+        PENDING_IDENTITY_CSV.parent.mkdir(parents=True, exist_ok=True)
+        with open(PENDING_IDENTITY_CSV, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["n", "key", "file", "imdb", "title", "year"])
+            for row in _PENDING_IDENTITY:
+                w.writerow([row["n"], row["key"], row["file"], row["imdb"], row["title"], row["year"]])
+    except OSError as e:
+        logging.debug("Could not write %s: %s", PENDING_IDENTITY_CSV.name, e)
+    return len({r["key"] for r in _PENDING_IDENTITY})
+
+
+def load_pick_selection(numbers: List[int]) -> Tuple[Dict[str, str], List[str]]:
+    """
+    Turn chosen numbers into 'title|year' -> imdb, using the list as written.
+
+    Returns (selection, problems); problems is empty when every number resolved.
+    """
+    rows: Dict[int, Dict[str, str]] = {}
+    try:
+        with open(PENDING_IDENTITY_CSV, "r", encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    rows[int(row["n"])] = row
+                except (TypeError, ValueError):
+                    continue
+    except OSError:
+        return {}, [f"no saved list — run with --dry-run first to produce {PENDING_IDENTITY_CSV.name}"]
+
+    selection: Dict[str, str] = {}
+    problems: List[str] = []
+    for n in numbers:
+        row = rows.get(n)
+        if not row:
+            problems.append(f"{n} is not in the list (it has {len(rows)} entries)")
+            continue
+        if not row.get("imdb"):
+            problems.append(f"{n} ({row.get('title')}) has no IMDB id — pick another, or use --imdb")
+            continue
+        if row["key"] in selection and selection[row["key"]] != row["imdb"]:
+            problems.append(f"{n} picks a second film for {row.get('title')!r} — one per film")
+            continue
+        selection[row["key"]] = row["imdb"]
+        logging.info("Pick %d: %s (%s) -> %s", n, row.get("title"), row.get("year"), row["imdb"])
+    return selection, problems
+
+
 _MOVIE_IMDB_CACHE: Dict[str, Tuple[Optional[str], List[Tuple[str, str]]]] = {}
 _MOVIE_IMDB_LOCK = threading.Lock()
 
@@ -1606,9 +1695,10 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
     if own_langs:
         logging.warning("    This file's audio: %s",
                         ", ".join(sorted(language_display(c) for c in own_langs)))
-    for i, c in enumerate(candidates, 1):
+    numbers = _register_pending_candidates(src, title, year, candidates)
+    for i, c in zip(numbers, candidates):
         hit = " <- matches this file's audio" if c.get("lang") in own_langs else ""
-        logging.warning("    %d. %s (%s)  %s%s", i, c["title"], c["year"] or "?",
+        logging.warning("    [%d] %s (%s)  %s%s", i, c["title"], c["year"] or "?",
                         language_display(c["lang"]) if c.get("lang") else "language unknown", hit)
         link = (f"https://www.imdb.com/title/{c['imdb']}/" if c.get("imdb")
                 else f"https://www.themoviedb.org/movie/{c.get('tmdb')}")
@@ -1617,12 +1707,8 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
             logging.warning("       original title: %s", c["original_title"])
         if c.get("overview"):
             logging.warning("       %s", c["overview"][:120] + ("..." if len(c["overview"]) > 120 else ""))
-    best = next((c for c in candidates if c.get("imdb")), None)
-    logging.warning("    Choose one, then either rerun scoped to this file with its id:")
-    logging.warning("        python MediaCleanup.py --movies --filter %r --imdb %s",
-                    src.stem[:24] + "*", (best or {}).get("imdb") or "tt1234567")
-    logging.warning("    or put the id in the filename (e.g. '%s (%s).%s.mkv') and rerun.",
-                    title, year or "YYYY", (best or {}).get("imdb") or "tt1234567")
+    best = next((n for n, c in zip(numbers, candidates) if c.get("imdb")), numbers[0])
+    logging.warning("    -> choose one of these with --pick, e.g. --pick %d", best)
 
 
 def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
@@ -1638,6 +1724,10 @@ def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
         logging.info("Using the IMDB id given on the command line for %s: %s",
                      src.name, _IMDB_OVERRIDE)
         return _IMDB_OVERRIDE, ""
+    picked = _PICK_SELECTION.get(_pending_key(title, year))
+    if picked:
+        logging.info("Using your pick for %s: %s", src.name, picked)
+        return picked, ""
     if known_imdb and re.fullmatch(r"tt\d{7,10}", known_imdb):
         logging.debug("Using IMDB id from the file itself: %s", known_imdb)
         return known_imdb, ""
@@ -7445,6 +7535,9 @@ def main() -> int:
     ap.add_argument("--skip-coverart", action="store_true",
                     help="Disable the automatic cover art embed that runs as the final pipeline step. "
                          "(The standalone --coverart mode is unaffected.)")
+    ap.add_argument("--pick", metavar="N", type=int, nargs="+", default=None,
+                    help="Choose films by the numbers shown in the previous run's list of "
+                         "candidates, e.g. --pick 1 4. Several may be given, one per film.")
     ap.add_argument("--imdb", metavar="ttNNNNNNN", default=None,
                     help="Identify the film in scope as this IMDB id, for a title the tool refuses "
                          "to guess between. Scope the run to one film with --filter/--input; the id "
@@ -7503,6 +7596,19 @@ def main() -> int:
         logging.error("%s", e)
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
+
+    # --pick turns numbers from the last run's list into identified films.
+    if args.pick:
+        if args.imdb:
+            logging.error("--pick and --imdb both choose a film; use one or the other.")
+            return 2
+        global _PICK_SELECTION
+        _PICK_SELECTION, problems = load_pick_selection(args.pick)
+        for p in problems:
+            logging.error("--pick %s", p)
+        if problems:
+            return 2
+        logging.info("Identifying %d film(s) from your picks.", len(_PICK_SELECTION))
 
     # --imdb identifies ONE film, so the run must be narrowed to one. Applying it
     # to a whole library would stamp the same id onto every file in it.
@@ -7933,6 +8039,20 @@ def main() -> int:
         for r in not_renamed:
             srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
             logging.warning("- %s | %s", srcs, r.details["rename_failed"])
+
+    # Films that could not be identified: save the numbered list so the choice
+    # can be made by number, and show the exact command that applies it.
+    _need = write_pending_identity()
+    if _need:
+        # One suggested number per film — the first candidate that has an id.
+        _first: Dict[str, int] = {}
+        for r in _PENDING_IDENTITY:
+            if r["imdb"] and r["key"] not in _first:
+                _first[r["key"]] = r["n"]
+        _nums = " ".join(str(n) for n in sorted(_first.values()))
+        logging.warning("%d film(s) need identifying — pick from the numbered list above, "
+                        "then rerun:", _need)
+        logging.warning("    python MediaCleanup.py --movies --pick %s", _nums or "N")
 
     print_results_table("Run results", results)
     return 0 if bad == 0 else 1

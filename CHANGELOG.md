@@ -3,6 +3,15 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.8.3] — 2026-08-27
+
+### Added
+- **`--pick N …` — choose an ambiguous film by number.** Candidates are numbered across the whole run, so a preview ends with a command you can run as-is: `--pick 1 3` identifies two different films at once, one number each. Numbers are **written to `logs/pending_identity.csv` and read back**, never recomputed — a later search could rank differently, and then the same number would quietly mean a different film. The list is rewritten each run and removed once nothing is outstanding.
+- Refusals now end with the number to use (`-> choose one of these with --pick, e.g. --pick 3`), and the run summary prints one suggested number per film.
+
+### Changed
+- `--imdb` remains for pinning a film by id without a preview first; `--pick` and `--imdb` are mutually exclusive.
+
 ## [1.8.2] — 2026-08-27
 
 ### Added
