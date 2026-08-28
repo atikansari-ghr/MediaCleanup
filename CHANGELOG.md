@@ -3,6 +3,16 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.8.4] — 2026-08-29
+
+### Fixed
+- **Renewed shows never got their `und` audio/video language resolved, or their genre/cast/director metadata.** The lookup required the filename's year to match the series' TMDB *first-air* year within ±1 — which holds for a show's first season, but a filename almost always carries the *current* season's air year, not the year the show debuted. A season 3 episode released three years after a series began missed by more than the tolerance and was silently skipped, in both the language-resolution path and the metadata-tagging path.
+- Both now resolve a series by an **exact, year-agnostic title match** instead — the same safety rule already used for the FileBot rename fallback, just reached from the paths that were refusing too early. When more than one series shares that exact title, nothing is guessed: it goes into the same numbered `--pick` list used for ambiguous movies (see below), annotated with the language each candidate was made in and marked when it matches the file's own audio.
+- The FileBot rename mechanism itself is untouched — it already resolves per-season years correctly via TheTVDB/TMDB and was not affected by this bug.
+
+### Added
+- **`--pick` now covers ambiguous TV shows too**, sharing the exact mechanism built for movies: numbered candidates, saved to `logs/pending_identity.csv`, read back rather than recomputed, one pick per title. The pending list now carries a `kind` column so a movie and a show of the same name can never collide.
+
 ## [1.8.3] — 2026-08-27
 
 ### Added

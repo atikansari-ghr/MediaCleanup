@@ -80,7 +80,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--force-audio-lang ID LANG` | Treat audio track `ID` as `LANG`, overriding the stored tag. For `und`/mislabeled tracks. Repeatable. Applies to **every** file in the run — scope with `--input`. |
 | `--force-sub-lang ID LANG` | Same for subtitle tracks. |
 | `--force-video-lang LANG` | Stamp the **video** track with this language instead of the title's TMDB original language. Accepts any supported language, not just targets. |
-| `--pick N [N …]` | Identify films by the numbers shown in the previous run's candidate list, e.g. `--pick 1 3`. One number per film; several films can be resolved in one command. |
+| `--pick N [N …]` | Identify films or TV shows by the numbers shown in the previous run's candidate list, e.g. `--pick 1 3`. One number per title; movies and shows can be mixed in one command. |
 | `--imdb ttNNNNNNN` | Identify the film in scope as this IMDB id, when the title is too ambiguous to resolve. Requires `--filter` or `--input` so it applies to one film. The id is written into the file's tags, so it is only ever needed once. |
 | `--no-lang-detect` | Do not try to identify tracks tagged `und` (see [Releases with no language tags](#releases-with-no-language-tags)). Config equivalent: `[languages] detect_undetermined = false`. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
@@ -372,6 +372,26 @@ Check the log for the lookup details (`[DRY]` run shows title/IMDB ID/languages 
 
 **Cover not showing in a player**
 The cover is a standard Matroska attachment named `cover.jpg`. Some players cache thumbnails — refresh the library. Verify it's embedded: `mkvmerge.exe -J file.mkv` → `attachments`.
+
+**A show's `und` tracks stay `und`, or its tags stay thin**
+
+A renewed show's release year is the year *that season* aired, not the year the series began — a season 3 episode released three years after the show's debut no longer matches its first-air year, so year-constrained lookups miss it. Both the language resolution below and the show/season/episode metadata tags now identify the series by an **exact, year-agnostic title match** instead, with the same `--pick` mechanism as movies when more than one series shares that exact title:
+
+```
+Cannot identify the show 'Show Name' — 3 series share that exact title.
+    This file's audio: Kannada
+    [1] Show Name (2026)  Kannada  IN <- matches this file's audio
+       https://www.themoviedb.org/tv/123456
+    [2] Show Name (2007)  English  US
+    ...
+    -> choose one of these with --pick, e.g. --pick 1
+```
+
+```bash
+python MediaCleanup.py --tv --pick 1
+```
+
+Movies and shows share one numbered list and one `--pick` command — pick several titles of either kind in one run, e.g. `--pick 1 3 5`.
 
 **A film left unrenamed, reported `PARTIAL`**
 

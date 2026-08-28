@@ -1463,23 +1463,37 @@ _PENDING_LOCK = threading.Lock()
 _PICK_SELECTION: Dict[str, str] = {}
 
 
-def _pending_key(title: str, year: Optional[str]) -> str:
-    """Identify a pending film by what was searched for, not by path — the file
-    that finally gets renamed may be a remux output living somewhere else."""
-    return f"{(title or '').strip().lower()}|{year or ''}"
+def _pending_key(kind: str, title: str, year: Optional[str]) -> str:
+    """
+    Identify a pending title by what was searched for and its kind, not by path
+    — the file that finally gets renamed may be a remux output living somewhere
+    else, and 'kind' keeps a film and a show of the same name from colliding.
+    """
+    return f"{kind}|{(title or '').strip().lower()}|{year or ''}"
 
 
-def _register_pending_candidates(src: Path, title: str, year: Optional[str],
+def _register_pending_candidates(kind: str, src_label: str, title: str, year: Optional[str],
                                  candidates: List[Dict[str, Any]]) -> List[int]:
-    """Record this film's candidates and return the number shown against each."""
+    """
+    Record this title's candidates and return the number shown against each.
+
+    A title already registered this run (its episode 2 hit the same ambiguous
+    show as episode 1, say) is not re-added — the numbers already assigned to
+    it are returned instead, so the same show does not get renumbered mid-run.
+    """
+    key = _pending_key(kind, title, year)
     with _PENDING_LOCK:
+        existing = [r["n"] for r in _PENDING_IDENTITY if r["key"] == key]
+        if existing:
+            return existing
         first = len(_PENDING_IDENTITY) + 1
         for c in candidates:
             _PENDING_IDENTITY.append({
                 "n": len(_PENDING_IDENTITY) + 1,
-                "key": _pending_key(title, year),
-                "file": src.name,
-                "imdb": c.get("imdb") or "",
+                "kind": kind,
+                "key": key,
+                "file": src_label,
+                "id": c.get("id") or "",
                 "title": c.get("title") or "",
                 "year": c.get("year") or "",
             })
@@ -1498,9 +1512,10 @@ def write_pending_identity() -> int:
         PENDING_IDENTITY_CSV.parent.mkdir(parents=True, exist_ok=True)
         with open(PENDING_IDENTITY_CSV, "w", encoding="utf-8", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["n", "key", "file", "imdb", "title", "year"])
+            w.writerow(["n", "kind", "key", "file", "id", "title", "year"])
             for row in _PENDING_IDENTITY:
-                w.writerow([row["n"], row["key"], row["file"], row["imdb"], row["title"], row["year"]])
+                w.writerow([row["n"], row["kind"], row["key"], row["file"],
+                           row["id"], row["title"], row["year"]])
     except OSError as e:
         logging.debug("Could not write %s: %s", PENDING_IDENTITY_CSV.name, e)
     return len({r["key"] for r in _PENDING_IDENTITY})
@@ -1508,7 +1523,7 @@ def write_pending_identity() -> int:
 
 def load_pick_selection(numbers: List[int]) -> Tuple[Dict[str, str], List[str]]:
     """
-    Turn chosen numbers into 'title|year' -> imdb, using the list as written.
+    Turn chosen numbers into 'kind|title|year' -> id, using the list as written.
 
     Returns (selection, problems); problems is empty when every number resolved.
     """
@@ -1530,14 +1545,14 @@ def load_pick_selection(numbers: List[int]) -> Tuple[Dict[str, str], List[str]]:
         if not row:
             problems.append(f"{n} is not in the list (it has {len(rows)} entries)")
             continue
-        if not row.get("imdb"):
-            problems.append(f"{n} ({row.get('title')}) has no IMDB id — pick another, or use --imdb")
+        if not row.get("id"):
+            problems.append(f"{n} ({row.get('title')}) has no id — pick another")
             continue
-        if row["key"] in selection and selection[row["key"]] != row["imdb"]:
-            problems.append(f"{n} picks a second film for {row.get('title')!r} — one per film")
+        if row["key"] in selection and selection[row["key"]] != row["id"]:
+            problems.append(f"{n} picks a second title for {row.get('title')!r} — one per title")
             continue
-        selection[row["key"]] = row["imdb"]
-        logging.info("Pick %d: %s (%s) -> %s", n, row.get("title"), row.get("year"), row["imdb"])
+        selection[row["key"]] = row["id"]
+        logging.info("Pick %d: %s (%s) -> %s", n, row.get("title"), row.get("year"), row["id"])
     return selection, problems
 
 
@@ -1633,11 +1648,13 @@ def resolve_movie_imdb_id(title: str, year: Optional[str]
                                  f"/external_ids?api_key={CFG.TMDB_API_KEY}") or {}
             tt = str(ids.get("imdb_id") or "").strip()
             iso1 = str(r.get("original_language") or "").strip()
+            resolved_tt = tt if re.fullmatch(r"tt\d{7,10}", tt) else ""
             candidates.append({
                 "title": str(r.get("title") or "?"),
                 "year": str(r.get("release_date") or "")[:4],
                 "released": str(r.get("release_date") or ""),
-                "imdb": tt if re.fullmatch(r"tt\d{7,10}", tt) else "",
+                "imdb": resolved_tt,
+                "id": resolved_tt,     # generic field the shared pending-list code reads
                 "tmdb": r.get("id"),
                 "lang": resolve_language(iso1) if iso1 else None,
                 "original_title": str(r.get("original_title") or ""),
@@ -1695,7 +1712,7 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
     if own_langs:
         logging.warning("    This file's audio: %s",
                         ", ".join(sorted(language_display(c) for c in own_langs)))
-    numbers = _register_pending_candidates(src, title, year, candidates)
+    numbers = _register_pending_candidates("movie", src.name, title, year, candidates)
     for i, c in zip(numbers, candidates):
         hit = " <- matches this file's audio" if c.get("lang") in own_langs else ""
         logging.warning("    [%d] %s (%s)  %s%s", i, c["title"], c["year"] or "?",
@@ -1725,7 +1742,7 @@ def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
         logging.info("Using the IMDB id given on the command line for %s: %s",
                      src.name, _IMDB_OVERRIDE)
         return _IMDB_OVERRIDE, ""
-    picked = _PICK_SELECTION.get(_pending_key(title, year))
+    picked = _PICK_SELECTION.get(_pending_key("movie", title, year))
     if picked:
         logging.info("Using your pick for %s: %s", src.name, picked)
         return picked, ""
@@ -2575,6 +2592,156 @@ def split_show_year(show: str) -> Tuple[str, Optional[str]]:
     return text, None
 
 
+
+# --- TV show identity: resolve a series to one TMDB id, for language and
+# metadata only — the FileBot rename keeps its own existing mechanism. -------
+# A renewed show's release year is the SEASON's air year, not the series'
+# first-air year (a show that debuted in 2023 still has its season 3 release
+# tagged '(2026)' three years later), so year cannot be used as a hard
+# constraint here the way it is for movies. An EXACT, unambiguous
+# title match is the safety net instead — the same rule resolve_tv_series_by_name
+# already uses safely for the rename fallback.
+
+_TV_IDENTITY_CACHE: Dict[str, Tuple[Optional[int], List[Dict[str, Any]]]] = {}
+_TV_IDENTITY_LOCK = threading.Lock()
+
+
+def resolve_tv_show_tmdb_id(show: str, year: Optional[str] = None
+                            ) -> Tuple[Optional[int], List[Dict[str, Any]]]:
+    """
+    Resolve a series to one TMDB id, or report why it could not be.
+
+    Returns (tmdb_id, candidates). tmdb_id is set only when exactly one series
+    has this exact title; otherwise it is None and candidates lists every
+    series with that exact title (year-agnostic — a genuine same-titled show
+    from another era is rare, and this is the case that needs a human).
+    """
+    if not CFG.TMDB_API_KEY or not show:
+        return None, []
+    key = f"{show.strip().lower()}"
+    with _TV_IDENTITY_LOCK:
+        if key in _TV_IDENTITY_CACHE:
+            return _TV_IDENTITY_CACHE[key]
+
+    tmdb_id: Optional[int] = None
+    candidates: List[Dict[str, Any]] = []
+    try:
+        url = (f"https://api.themoviedb.org/3/search/tv?api_key={CFG.TMDB_API_KEY}"
+               f"&query={urllib.parse.quote(show)}")
+        results = (_http_get_json(url) or {}).get("results") or []
+        exact = [r for r in results
+                 if _match_key(r.get("name")) == _match_key(show)
+                 or _match_key(r.get("original_name")) == _match_key(show)]
+
+        if len(exact) == 1 and exact[0].get("id"):
+            tmdb_id = int(exact[0]["id"])
+            logging.debug("TV series resolved: %r -> %s (%s)", show, tmdb_id, exact[0].get("name"))
+        elif len(exact) > 1:
+            for r in exact[:5]:
+                iso1 = str(r.get("original_language") or "").strip()
+                candidates.append({
+                    "title": str(r.get("name") or "?"),
+                    "year": str(r.get("first_air_date") or "")[:4],
+                    "id": str(r.get("id") or ""),
+                    "lang": resolve_language(iso1) if iso1 else None,
+                    "original_title": str(r.get("original_name") or ""),
+                    "overview": " ".join(str(r.get("overview") or "").split()),
+                    "origin_country": ", ".join(r.get("origin_country") or []),
+                })
+    except Exception as e:
+        logging.debug("TV series lookup failed for %r: %s", show, e)
+
+    with _TV_IDENTITY_LOCK:
+        _TV_IDENTITY_CACHE[key] = (tmdb_id, candidates)
+    return tmdb_id, candidates
+
+
+def _report_tv_candidates(src_label: str, title: str, year: Optional[str],
+                          candidates: List[Dict[str, Any]], own_langs: Set[str]) -> List[int]:
+    """Print the series a title matched, same shape as the movie report."""
+    logging.warning("Cannot identify the show %r — %d series share that exact title.",
+                    title, len(candidates))
+    if own_langs:
+        logging.warning("    This file's audio: %s",
+                        ", ".join(sorted(language_display(c) for c in own_langs)))
+    numbers = _register_pending_candidates("tv", src_label, title, year, candidates)
+    for i, c in zip(numbers, candidates):
+        hit = " <- matches this file's audio" if c.get("lang") in own_langs else ""
+        where = f"  {c['origin_country']}" if c.get("origin_country") else ""
+        logging.warning("    [%d] %s (%s)  %s%s%s", i, c["title"], c["year"] or "?",
+                        language_display(c["lang"]) if c.get("lang") else "language unknown",
+                        where, hit)
+        logging.warning("       https://www.themoviedb.org/tv/%s", c.get("id") or "")
+        if c.get("original_title") and _match_key(c["original_title"]) != _match_key(c["title"]):
+            logging.warning("       original title: %s", c["original_title"])
+        if c.get("overview"):
+            logging.warning("       %s", c["overview"][:120] + ("..." if len(c["overview"]) > 120 else ""))
+    best = next((n for n, c in zip(numbers, candidates) if c.get("id")), numbers[0])
+    logging.warning("    -> choose one of these with --pick, e.g. --pick %d", best)
+    return numbers
+
+
+_TV_ORIG_LANG_CACHE: Dict[int, Optional[str]] = {}
+_TV_ORIG_LANG_LOCK = threading.Lock()
+
+
+def tv_original_language_from_id(tmdb_id: int) -> Optional[str]:
+    """The language a series was made in, from an ALREADY-resolved TMDB id."""
+    with _TV_ORIG_LANG_LOCK:
+        if tmdb_id in _TV_ORIG_LANG_CACHE:
+            return _TV_ORIG_LANG_CACHE[tmdb_id]
+    canon: Optional[str] = None
+    try:
+        data = _http_get_json(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={CFG.TMDB_API_KEY}")
+        iso1 = str((data or {}).get("original_language") or "").strip()
+        canon = resolve_language(iso1) if iso1 else None
+    except Exception as e:
+        logging.debug("Could not fetch original_language for tmdb:%s: %s", tmdb_id, e)
+    with _TV_ORIG_LANG_LOCK:
+        _TV_ORIG_LANG_CACHE[tmdb_id] = canon
+    return canon
+
+
+def tv_show_identity(src_label: str, title: str, year: Optional[str],
+                     known_imdb: Optional[str] = None,
+                     own_langs: Optional[Set[str]] = None) -> Optional[int]:
+    """
+    The TMDB series id to use for language/metadata, or None when it cannot be
+    determined — in which case the caller leaves the affected data alone
+    rather than guessing (an und track stays und; metadata is skipped).
+
+    Scope: language resolution and metadata tagging only. The FileBot rename
+    keeps using its own existing TheTVDB-first, TMDB-fallback mechanism —
+    unrelated to this function on purpose, so that path is not touched here.
+    """
+    if not title:
+        return None
+    picked = _PICK_SELECTION.get(_pending_key("tv", title, year))
+    if picked:
+        logging.debug("Using your pick for the show %r: tmdb:%s", title, picked)
+        try:
+            return int(picked)
+        except (TypeError, ValueError):
+            return None
+
+    if known_imdb and re.fullmatch(r"tt\d{7,10}", known_imdb):
+        try:
+            data = _http_get_json(f"https://api.themoviedb.org/3/find/{known_imdb}"
+                                  f"?api_key={CFG.TMDB_API_KEY}&external_source=imdb_id")
+            shows = (data or {}).get("tv_results") or []
+            if shows and shows[0].get("id"):
+                return int(shows[0]["id"])
+        except Exception as e:
+            logging.debug("IMDB->TMDB lookup failed for %s: %s", known_imdb, e)
+
+    tmdb_id, candidates = resolve_tv_show_tmdb_id(title)
+    if tmdb_id:
+        return tmdb_id
+    if candidates:
+        _report_tv_candidates(src_label, title, year, candidates, own_langs or set())
+    return None
+
+
 def tmdb_original_language(title: str, year: Optional[str], is_tv: bool) -> Optional[str]:
     """
     The language a title was made in, as a canonical ISO 639-2 code.
@@ -2695,7 +2862,18 @@ def resolve_undetermined_track_languages(
             logging.info("%d audio tracks are unlabelled in %s — cannot tell them apart; "
                          "use --force-audio-lang to set them.", len(unlabelled_audio), mkv.name)
         elif title:
-            canon = tmdb_original_language(title, year, is_tv)
+            # TV: a renewed show's release year is the SEASON's air year, not
+            # the series' first-air year, so year cannot gate this lookup the
+            # way it does for movies — tv_show_identity() matches on an exact,
+            # unambiguous title instead (auto-resolves; asks via --pick only
+            # when more than one series shares that exact title).
+            canon: Optional[str] = None
+            if is_tv:
+                tv_id = tv_show_identity(mkv.name, title, year)
+                if tv_id:
+                    canon = tv_original_language_from_id(tv_id)
+            else:
+                canon = tmdb_original_language(title, year, False)
             if canon:
                 resolved_audio[unlabelled_audio[0].id] = canon
                 logging.info("Audio track %d in %s is unlabelled — %s is in %s per TMDB, using that.",
@@ -4691,21 +4869,14 @@ class MetadataFetcher:
             if imdb_id:
                 _mv, tv_id = self._tmdb_ids_for_imdb(imdb_id)
             if tv_id is None and search_name:
-                if show_year:
-                    # Year known: accept only a series from that year — wrong
-                    # metadata is worse than none.
-                    tv_id = resolve_tv_series_tmdb_id(search_name, show_year)
-                    if tv_id is None:
-                        logging.info("No TMDB series %r (%s) — skipping metadata rather than "
-                                     "tagging with a different show.", search_name, show_year)
-                else:
-                    # No year: only an exact, unambiguous title match is safe —
-                    # ranking alone answers 'Show Name' with 'Show Name Extended'.
-                    by_name = resolve_tv_series_by_name(search_name)
-                    tv_id = by_name[0] if by_name else None
-                    if tv_id is None:
-                        logging.info("Cannot pin %r to one series without a year — skipping "
-                                     "metadata rather than using another show's.", search_name)
+                # A renewed show's release year is the SEASON's air year, not the
+                # series' first-air year, so year cannot gate this the way it does
+                # for movies. tv_show_identity() matches on an exact, unambiguous
+                # title instead — the same safety rule, without the year trap.
+                tv_id = tv_show_identity(f"{search_name} metadata", search_name, show_year, imdb_id)
+                if tv_id is None:
+                    logging.info("Cannot identify the series %r — skipping metadata rather "
+                                 "than tagging with a different show's.", search_name)
             if tv_id is None:
                 return None
 
@@ -8052,15 +8223,15 @@ def main() -> int:
     # after the table, because the table is the last thing most people look at.
     _need = write_pending_identity()
     if _need:
-        # One suggested number per film — the first candidate that has an id.
+        # One suggested number per title — the first candidate that has an id.
         _first: Dict[str, int] = {}
         for r in _PENDING_IDENTITY:
-            if r["imdb"] and r["key"] not in _first:
+            if r["id"] and r["key"] not in _first:
                 _first[r["key"]] = r["n"]
         _nums = " ".join(str(n) for n in sorted(_first.values()))
-        logging.warning("%d film(s) need identifying — pick from the numbered list above, "
-                        "then rerun:", _need)
-        logging.warning("    python MediaCleanup.py --movies --pick %s", _nums or "N")
+        logging.warning("%d title(s) need identifying — pick from the numbered list above, "
+                        "then rerun with the same scope plus --pick:", _need)
+        logging.warning("    python MediaCleanup.py --pick %s", _nums or "N")
     return 0 if bad == 0 else 1
 
 
