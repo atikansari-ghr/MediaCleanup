@@ -58,8 +58,9 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | *(none)* | Normal pipeline: group, select tracks, remux, tag-clean + metadata, FileBot rename, cover art. One run fully finishes each file. |
 | `--cleantags` | Standalone: clean promotional/advertising tags in-place on every MKV in scope. No remux. When API keys are configured, also embeds rich metadata — see [Metadata tags](#metadata-tags) below. |
 | `--coverart` | Standalone: fetch and embed cover art into every MKV in scope that doesn't have one. No remux. See [Cover art](#cover-art) below. |
+| `--cleanmetadata` | Standalone: `--cleantags` and `--coverart` in one command — clean tags, embed metadata, rename in place, then embed cover art on the final filenames. No remux. See [Cleaning tags and cover art together](#cleaning-tags-and-cover-art-together). |
 | `--coverart-overwrite` | With `--coverart`: replace an existing embedded cover instead of skipping the file. |
-| `--clear` | Removal modifier. With `--cleantags`: wipe **all** tags, the segment title and every track name, writing nothing back (offline). With `--coverart`: delete embedded cover art and forget the file in the ledger so a later run re-fetches it. |
+| `--clear` | Removal modifier. With `--cleantags`: wipe **all** tags, the segment title and every track name, writing nothing back (offline). With `--coverart`: delete embedded cover art and forget the file in the ledger so a later run re-fetches it. With `--cleanmetadata`: both at once, and never a rename. |
 | `--rename` | Standalone: FileBot-rename every MKV in scope into the canonical format. Requires exactly one of `--movies`/`--tv`. See [Renaming messy filenames](#renaming-messy-filenames). |
 | `--rename-into` | With `--rename`: move files into the library structure under the configured roots. |
 | `--rename-undo` | Revert the most recent `--rename` batch, then exit. |
@@ -184,6 +185,23 @@ Some.Film.2026.1080p.WEBRip.x264-GRP.mp4  +  Some.Film.2026.1080p.WEBRip.x264-GR
 **Chapters are kept** — they are real navigation data — but any chapter *name* that advertises is rewritten to a plain `Chapter NN`.
 
 This is the one place the tool edits stream content rather than metadata alone, a deliberate exception to the safety model in [Safety](#safety-model) made so that advertising cannot be welded permanently into your library.
+
+## Cleaning tags and cover art together
+
+`--cleanmetadata` is `--cleantags` followed by `--coverart`, as one command and without remuxing:
+
+```bash
+python MediaCleanup.py --cleanmetadata --movies
+python MediaCleanup.py --cleanmetadata --tv --filter "Show*"
+```
+
+It is the finishing half of the main `--movies`/`--tv` pipeline for files that need no track changes: tags cleaned, metadata embedded, the file renamed in place, and a poster embedded under the final name. `--filter`, `--input`, `--dry-run` and `--coverart-overwrite` all apply, and the old `--cleantags` and `--coverart` modes are unchanged.
+
+**Order matters, so the second step is handed the first step's files.** `--cleantags` may rename a file, and a `--filter` written for the old name (`Some.Film.2026.*`) would no longer match the new one (`Some Film (2026) - …`). The cover art step therefore processes exactly the files cleantags produced instead of rescanning, so a rename can never cause a file to be skipped.
+
+**A film that cannot be identified gets no poster.** When more than one film shares a title and year, cleantags leaves the file unrenamed (see [A film left unrenamed](#troubleshooting)) and the cover step skips it too: a poster chosen by title alone would be whichever film the database ranked first, which is as wrong as a wrong rename. Pick the film with `--pick`, run again, and it gets its tags, name and poster together.
+
+**`--clear` undoes both and never renames.** `--cleanmetadata --clear` wipes every tag, the segment title and all track names, and removes the embedded cover art and its ledger entry, leaving the file bare under its current name. It is offline — no database lookups. Add `--dry-run` to see what would be removed first.
 
 ## Cover art
 

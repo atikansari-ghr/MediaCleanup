@@ -3,6 +3,17 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-10-03
+
+### Added
+- **`--cleanmetadata` — `--cleantags` and `--coverart` as one command.** Cleans tags, embeds metadata and renames in place, then embeds cover art on the final filenames, with no remux. `--filter`, `--input`, `--dry-run` and `--coverart-overwrite` apply; the two modes it combines are unchanged. With `--clear` it undoes both at once — every tag, the segment title and all track names wiped, the cover art and its ledger entry removed — and never renames.
+  - **The cover art step is handed the files the first step produced** rather than rescanning. `--cleantags` may rename a file, and a `--filter` written for the old name would no longer match the new one, so a rescan would quietly skip exactly the files that had just been renamed.
+  - **A film that could not be identified gets no poster.** When several films share a title and year the file is left unrenamed, and cover art is now skipped for it too: a poster chosen by title alone is whichever film the database ranked first.
+
+### Fixed
+- **`--cleantags` printed numbered candidates that `--pick` could never find.** The list was only saved at the end of the main pipeline, so any other mode offered a choice that could not be acted on. Saving the list and printing the `--pick` command is now one shared step used by every mode that can list candidates.
+- **A `--cleantags` dry run never showed which films the real run would refuse.** The identity check only ran for real runs, so "dry run, read the numbers, then `--pick`" could not work for it. The dry run now performs the same read-only lookup and reports the same refusal.
+
 ## [1.8.4] — 2026-08-29
 
 ### Fixed

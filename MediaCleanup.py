@@ -4119,6 +4119,10 @@ def _cleantags_one(
         return ct
 
     current = mkv_path  # will be updated if the file gets renamed
+    # False when a film could not be pinned to one IMDB id. A follow-on step such
+    # as cover art must not then guess by title: the poster of whichever film the
+    # database happened to rank first is as wrong as a wrong rename would be.
+    identified = True
 
     if not skip_filebot and not dry_run:
         # Extract clean title and IMDB so we can use them whether FileBot runs or not
@@ -4149,6 +4153,7 @@ def _cleantags_one(
         filebot_ok = False
         if not is_tv and not pinned_imdb:
             logging.warning("cleantags: leaving %s unrenamed — %s", mkv_path.name, blocked_reason)
+            identified = False
         elif CFG.FILEBOT_EXE.exists() and not _FILEBOT_DISABLED:
             logging.info("cleantags FileBot rename: %s  (query=%s)", mkv_path.name, query)
             fb = run_filebot_rename_final_mkv(mkv_path, db=db, filebot_format=fmt,
@@ -4169,7 +4174,23 @@ def _cleantags_one(
             if not ct2.ok:
                 logging.warning("cleantags (post-rename) failed (non-fatal): %s", ct2.reason)
 
-    return Result(kind=kind, source_items=[mkv_path], output_path=current, ok=True)
+    elif not skip_filebot and dry_run and not is_tv:
+        # A dry run renames nothing, but it must still report which films the real
+        # run would refuse — that is where the numbered candidates come from, and
+        # without it "dry run, read the numbers, then --pick" cannot work. The
+        # lookups are read-only, so G3 still holds.
+        p_title, p_year, p_imdb = parse_title_year_imdb_from_filename(mkv_path)
+        if not p_title:
+            p_title, p_year = infer_movie_name_year_from_path(mkv_path)
+        if not p_imdb:
+            p_imdb = extract_imdb_id_from_movie_path(mkv_path) or extract_imdb_from_mkv_tags(mkv_path)
+        pinned, why = movie_identity_for_rename(mkv_path, p_title or mkv_path.stem, p_year, p_imdb)
+        if not pinned:
+            logging.warning("[DRY] cleantags would leave %s unrenamed — %s", mkv_path.name, why)
+            identified = False
+
+    return Result(kind=kind, source_items=[mkv_path], output_path=current, ok=True,
+                  details={"is_tv": is_tv, "identified": identified})
 
 
 def run_cleantags_pipeline(
@@ -5266,9 +5287,14 @@ def run_coverart_pipeline(
     overwrite_cover: bool = False,
     filters: Optional[List[str]] = None,
     clear_only: bool = False,
+    only_files: Optional[List[Tuple[Path, bool]]] = None,
 ) -> List[Result]:
     """Scan Movies/TV roots and embed cover art into every MKV missing one
-    (or, with clear_only, remove embedded cover art)."""
+    (or, with clear_only, remove embedded cover art).
+
+    only_files: (path, is_tv) pairs to process INSTEAD of scanning. A step that
+    has just renamed files must pass them explicitly — rescanning with --filter
+    would test the new names against a pattern written for the old ones."""
     movies_root = movies_root or CFG.MOVIES_ROOT
     tv_root = tv_root or CFG.TV_ROOT
 
@@ -5277,10 +5303,14 @@ def run_coverart_pipeline(
                         "only local poster files (poster.jpg/cover.jpg/folder.jpg) will be used.",
                         CONFIG_FILE.name)
 
-    movie_set: set[Path] = set(apply_scan_filters(scan_mkvs(movies_root), movies_root,
-                                                  filters, "coverart")) if do_movies else set()
-    tv_set: set[Path] = set(apply_scan_filters(scan_mkvs(tv_root), tv_root,
-                                               filters, "coverart")) if do_tv else set()
+    if only_files is not None:
+        movie_set: set[Path] = set()
+        tv_set: set[Path] = set()
+    else:
+        movie_set = set(apply_scan_filters(scan_mkvs(movies_root), movies_root,
+                                           filters, "coverart")) if do_movies else set()
+        tv_set = set(apply_scan_filters(scan_mkvs(tv_root), tv_root,
+                                        filters, "coverart")) if do_tv else set()
     if do_movies:
         logging.info("coverart - Movies: %d MKV(s) found in %s.", len(movie_set), movies_root)
     if do_tv:
@@ -5289,6 +5319,9 @@ def run_coverart_pipeline(
     # Dedupe (both pipelines may scan the same --input root). For files seen by
     # both, classify by SxxEyy episode pattern in the filename.
     tagged_targets: List[Tuple[Path, bool]] = []
+    if only_files is not None:
+        tagged_targets = [(p, tv) for p, tv in only_files if p.exists()]
+        logging.info("coverart - %d file(s) handed over from the previous step.", len(tagged_targets))
     for p in sorted(movie_set | tv_set):
         if p in movie_set and p in tv_set:
             is_tv = bool(_SEASON_EP_RE.search(p.stem))
@@ -7630,6 +7663,30 @@ def self_check() -> int:
 # Main
 # =========================
 
+def report_pending_identity() -> int:
+    """
+    Save the numbered list of titles that could not be identified, so the choice
+    can be made by number, and show the command that applies it.
+
+    Every mode that can print numbered candidates must call this: the numbers
+    are only meaningful because they are written down and read back by --pick,
+    and a mode that prints them without saving them offers a choice that cannot
+    be acted on.
+    """
+    need = write_pending_identity()
+    if need:
+        # One suggested number per title — the first candidate that has an id.
+        first: Dict[str, int] = {}
+        for r in _PENDING_IDENTITY:
+            if r["id"] and r["key"] not in first:
+                first[r["key"]] = r["n"]
+        nums = " ".join(str(n) for n in sorted(first.values()))
+        logging.warning("%d title(s) need identifying — pick from the numbered list above, "
+                        "then rerun with the same scope plus --pick:", need)
+        logging.warning("    python MediaCleanup.py --pick %s", nums or "N")
+    return need
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="MediaCleanup.py (Enhanced) - MKV cleanup/merge tool (Movies + TV) using MKVToolNix")
     ap.add_argument("--dry-run", action="store_true", help="Log actions without copying/remuxing.")
@@ -7673,6 +7730,10 @@ def main() -> int:
                          "the segment title and every track name, writing nothing back (offline, no "
                          "database lookups). With --coverart: delete embedded cover art and forget the "
                          "file in the ledger so a later run re-fetches it.")
+    ap.add_argument("--cleanmetadata", action="store_true",
+                    help="Standalone mode: --cleantags and --coverart in one command. Cleans tags, embeds "
+                         "metadata and renames in place, then embeds cover art on the final filenames. "
+                         "With --clear it instead wipes all tags AND removes cover art, and never renames.")
     ap.add_argument("--rename", action="store_true",
                     help="Standalone mode: rename MKVs into the canonical naming format via FileBot "
                          "(no remux, no tag changes unless --force-*-lang is given). Requires exactly "
@@ -7883,6 +7944,7 @@ def main() -> int:
 
     # Standalone modes are mutually exclusive.
     modes = [m for m, on in (("--cleantags", args.cleantags), ("--coverart", args.coverart),
+                             ("--cleanmetadata", args.cleanmetadata),
                              ("--rename", args.rename), ("--subtitles", args.subtitles),
                              ("--mp4tomkv", args.mp4tomkv),
                              ("--rename-undo", args.rename_undo)) if on]
@@ -7890,8 +7952,8 @@ def main() -> int:
         logging.error("Invalid arguments: %s are separate modes; run them one at a time.", " and ".join(modes))
         return 2
 
-    if args.clear and not (args.cleantags or args.coverart):
-        logging.error("--clear applies to --cleantags or --coverart.")
+    if args.clear and not (args.cleantags or args.coverart or args.cleanmetadata):
+        logging.error("--clear applies to --cleantags, --coverart or --cleanmetadata.")
         return 2
 
     if args.backup and not args.inplace:
@@ -7907,7 +7969,7 @@ def main() -> int:
 
     # mkvpropedit is needed for cleantags (standalone or auto after remux) and for --coverart.
     # Skip validation failure if mkvpropedit is absent and --skip-cleantags was set.
-    need_propedit = (not args.skip_cleantags) or args.coverart
+    need_propedit = (not args.skip_cleantags) or args.coverart or args.cleanmetadata
     try:
         validate_tools(need_propedit=need_propedit)
     except Exception as e:
@@ -7993,6 +8055,65 @@ def main() -> int:
         print_results_table("MP4 to MKV", mp4_results)
         return 0 if bad_mp4 == 0 else 1
 
+    # --cleanmetadata standalone: --cleantags then --coverart in one command.
+    if args.cleanmetadata:
+        # Step 1: tags + metadata (+ rename in place). With --clear this wipes the
+        # tags instead, offline and without renaming.
+        ct_results = run_cleantags_pipeline(
+            do_movies=do_movies, do_tv=do_tv, dry_run=args.dry_run, workers=args.workers,
+            movies_root=movies_root, tv_root=tv_root, skip_filebot=False,
+            filters=args.filter, clear_all=args.clear,
+        )
+        ok_ct = sum(1 for r in ct_results if r.ok)
+        bad_ct = len(ct_results) - ok_ct
+        logging.info("%s summary: total=%d OK=%d failed=%d",
+                     "cleartags" if args.clear else "cleantags", len(ct_results), ok_ct, bad_ct)
+        for r in ct_results:
+            if not r.ok:
+                logging.error("  FAILED: %s | %s",
+                              r.source_items[0].name if r.source_items else "?", r.reason)
+
+        # Step 2: cover art. Hand over exactly the files step 1 produced — rescanning
+        # with --filter would test their NEW names against a pattern meant for the
+        # old ones, and silently skip anything the rename had changed.
+        if args.clear:
+            handed = None   # clearing never renames, so the ordinary scan is correct
+        else:
+            handed = [(r.output_path, bool(r.details.get("is_tv")))
+                      for r in ct_results
+                      if r.ok and r.output_path is not None and r.details.get("identified", True)]
+            held_back = [r for r in ct_results if r.ok and not r.details.get("identified", True)]
+            if held_back:
+                logging.warning("Skipping cover art for %d film(s) that could not be identified — "
+                                "a poster chosen by title alone could belong to a different film. "
+                                "Use --pick, then run again.", len(held_back))
+        ca_results = run_coverart_pipeline(
+            do_movies=do_movies, do_tv=do_tv, dry_run=args.dry_run, workers=args.workers,
+            movies_root=movies_root, tv_root=tv_root,
+            overwrite_cover=args.coverart_overwrite, filters=args.filter,
+            clear_only=args.clear, only_files=handed,
+        )
+        ok_ca = sum(1 for r in ca_results if r.ok)
+        bad_ca = len(ca_results) - ok_ca
+        if args.clear:
+            cleared = sum(1 for r in ca_results if r.ok and r.details.get("source") == "cleared")
+            logging.info("coverart clear summary: total=%d cleared=%d (had none: %d) failed=%d",
+                         len(ca_results), cleared, ok_ca - cleared, bad_ca)
+        else:
+            skipped_ca = sum(1 for r in ca_results
+                             if r.ok and r.reason in ("already_has_cover", "ledger_skip"))
+            logging.info("coverart summary: total=%d OK=%d (already done: %d) failed=%d",
+                         len(ca_results), ok_ca, skipped_ca, bad_ca)
+        for r in ca_results:
+            if not r.ok:
+                logging.error("  FAILED: %s | %s",
+                              r.source_items[0].name if r.source_items else "?", r.reason)
+
+        print_results_table("Cleantags results", ct_results)
+        print_results_table("Cover art results", ca_results)
+        report_pending_identity()
+        return 0 if (bad_ct == 0 and bad_ca == 0) else 1
+
     # --cleantags standalone: scan roots, clean tags in-place, then exit.
     if args.cleantags:
         ct_results = run_cleantags_pipeline(
@@ -8015,6 +8136,7 @@ def main() -> int:
                 if not r.ok:
                     logging.error("  FAILED: %s | %s", r.source_items[0].name if r.source_items else "?", r.reason)
         print_results_table("Cleantags results", ct_results)
+        report_pending_identity()
         return 0 if bad_ct == 0 else 1
 
     # --rename standalone: FileBot-rename every MKV in scope, then exit.
@@ -8218,20 +8340,8 @@ def main() -> int:
 
     print_results_table("Run results", results)
 
-    # Films that could not be identified: save the numbered list so the choice
-    # can be made by number, and show the exact command that applies it. Printed
-    # after the table, because the table is the last thing most people look at.
-    _need = write_pending_identity()
-    if _need:
-        # One suggested number per title — the first candidate that has an id.
-        _first: Dict[str, int] = {}
-        for r in _PENDING_IDENTITY:
-            if r["id"] and r["key"] not in _first:
-                _first[r["key"]] = r["n"]
-        _nums = " ".join(str(n) for n in sorted(_first.values()))
-        logging.warning("%d title(s) need identifying — pick from the numbered list above, "
-                        "then rerun with the same scope plus --pick:", _need)
-        logging.warning("    python MediaCleanup.py --pick %s", _nums or "N")
+    # Printed after the table, because the table is the last thing most people look at.
+    report_pending_identity()
     return 0 if bad == 0 else 1
 
 

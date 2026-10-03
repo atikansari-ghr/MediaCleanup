@@ -122,6 +122,8 @@ python MediaCleanup.py --movies --inplace --backup       :: replace sources, kee
 python MediaCleanup.py --audio-langs Telugu Hindi        :: keep only these languages this run
 python MediaCleanup.py --cleantags                       :: clean tags + metadata, no remux
 python MediaCleanup.py --coverart                        :: embed cover art in-place
+python MediaCleanup.py --cleanmetadata                   :: tags + metadata + rename + cover art, no remux
+python MediaCleanup.py --cleanmetadata --clear           :: wipe tags AND cover art, never renames
 python MediaCleanup.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
 python MediaCleanup.py --rename-undo                     :: revert the last rename batch
 python MediaCleanup.py --subtitles                       :: download missing sidecar subs
