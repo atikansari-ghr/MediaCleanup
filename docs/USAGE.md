@@ -218,6 +218,14 @@ Cover art is embedded **automatically at the end of every pipeline run** (after 
 
 API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys simply disable that source; with no keys at all, only local files are used.
 
+**Films that cannot be identified.** A poster is only embedded for a film that has been pinned to one IMDB id — read from the filename, folder or tags, or resolved by the same check the rename uses. When several films share a title and a year, a title search would simply return whichever the database ranks first, so the file is **left exactly as it is**: nothing is embedded, a cover it already has is not replaced, and nothing is recorded in the ledger. It shows as a skip, with the numbered candidates listed so you can choose one and run again:
+
+```bash
+python MediaCleanup.py --coverart --pick 2
+```
+
+A film that is identified but has no poster in any source is left untouched in the same way. A local `poster.jpg` next to the file always wins, because that is an explicit choice. A `--dry-run` stays fully offline, so it cannot say in advance which films will be skipped.
+
 **Poster language:** English is always preferred. If no English poster exists, the file's own audio languages (Hindi/Telugu) are tried next, then textless posters.
 
 **TV:** every episode gets the **show** poster (not episode stills). It's downloaded once per series per run and reused.

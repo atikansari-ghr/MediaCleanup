@@ -3,6 +3,16 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] — 2026-10-03
+
+### Fixed
+- **Cover art could embed a different film's poster.** When several films share a title and a year, the poster was looked up by title alone and the top search hit was taken, so an ambiguous film was given whichever film's artwork the database ranked first — silently, and in place of the cover that came with the file. In a test the guessed poster was 306 KB and the correctly identified film's was 129 KB. Cover art now requires the film to be pinned to one IMDB id first, by the same check the rename uses, and a film that cannot be pinned is **left exactly as it is**: no poster embedded, no existing cover replaced, nothing recorded in the ledger. It is reported as a skip with the reason, and its numbered candidates are listed so `--pick` can resolve it. The poster fetch itself is now id-only, so the title-search guess cannot come back through another caller.
+  - Applies to standalone `--coverart`, the cover step at the end of `--movies`/`--tv`, and `--cleanmetadata`. A film that is identified but has no poster anywhere is likewise left untouched.
+  - A local `poster.jpg` next to the file still wins, since that is an explicit choice rather than a guess.
+- **`--rename` and `--mp4tomkv` printed numbered candidates that `--pick` could not find**, the same gap fixed for `--cleantags` in 1.9.0. All three modes that list candidates now save the list.
+- A film passing through several steps in one run no longer prints its full candidate list each time; later steps refer back to the numbers already shown.
+- "Third-party cover found — replacing" was logged before the check that decides whether anything is replaced. It is now logged only when a poster has actually been found.
+
 ## [1.9.0] — 2026-10-03
 
 ### Added

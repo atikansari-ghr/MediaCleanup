@@ -896,7 +896,7 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
 
 # Result.reason values that mean "nothing to do" rather than "work done".
 _SKIP_REASONS = ("already_has_cover", "already_covered", "already_named",
-                 "ledger_skip", "dry-run", "unchanged")
+                 "ledger_skip", "dry-run", "unchanged", "film_unidentified")
 
 
 def print_results_table(title: str, results: List[Result]) -> None:
@@ -940,7 +940,7 @@ def print_results_table(title: str, results: List[Result]) -> None:
         elif r.kind == "rename" and (r.details.get("new") or r.details.get("proposed")):
             detail = f"-> {Path(str(r.details.get('new') or r.details.get('proposed'))).name}"
         elif r.kind == "coverart":
-            detail = str(r.details.get("source") or r.reason or "")
+            detail = str(r.details.get("note") or r.details.get("source") or r.reason or "")
         elif r.kind == "subtitles":
             detail = ", ".join(r.details.get("langs") or []) or r.reason
         elif r.output_path is not None and r.output_path.name != name:
@@ -1472,6 +1472,13 @@ def _pending_key(kind: str, title: str, year: Optional[str]) -> str:
     return f"{kind}|{(title or '').strip().lower()}|{year or ''}"
 
 
+def _already_listed(kind: str, title: str, year: Optional[str]) -> List[int]:
+    """Numbers already assigned to this title earlier in the run, if any."""
+    key = _pending_key(kind, title, year)
+    with _PENDING_LOCK:
+        return [r["n"] for r in _PENDING_IDENTITY if r["key"] == key]
+
+
 def _register_pending_candidates(kind: str, src_label: str, title: str, year: Optional[str],
                                  candidates: List[Dict[str, Any]]) -> List[int]:
     """
@@ -1707,6 +1714,13 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
     language a film was made in usually settles it on its own, especially when
     it matches a language the file itself carries.
     """
+    earlier = _already_listed("movie", title, year)
+    if earlier:
+        # A film passes through several steps in one run (identity gate, cover
+        # art, ...). Listing every candidate again each time buries the output.
+        logging.warning("Cannot identify %s — same candidates as listed above: %s.",
+                        src.name, ", ".join(f"[{n}]" for n in earlier))
+        return earlier
     logging.warning("Cannot identify %s — %d films match %r (%s).",
                     src.name, len(candidates), title, year or "no year")
     if own_langs:
@@ -2659,6 +2673,9 @@ def resolve_tv_show_tmdb_id(show: str, year: Optional[str] = None
 def _report_tv_candidates(src_label: str, title: str, year: Optional[str],
                           candidates: List[Dict[str, Any]], own_langs: Set[str]) -> List[int]:
     """Print the series a title matched, same shape as the movie report."""
+    earlier = _already_listed("tv", title, year)
+    if earlier:
+        return earlier
     logging.warning("Cannot identify the show %r — %d series share that exact title.",
                     title, len(candidates))
     if own_langs:
@@ -4565,10 +4582,11 @@ class CoverArtFetcher:
         tmdb_id: Optional[int] = None
 
         if CFG.TMDB_API_KEY:
+            # By id only. This used to fall back to a title search and take the top
+            # hit, which for a title shared by several films embedded the wrong
+            # film's poster; callers must now pin the film to an IMDB id first.
             if imdb_id:
                 tmdb_id, _tv = self._tmdb_find_by_imdb(imdb_id)
-            if tmdb_id is None and title:
-                tmdb_id = self._tmdb_search(title, year, is_tv=False)
             if tmdb_id is not None:
                 purl = self._tmdb_pick_poster_url(tmdb_id, is_tv=False, lang_pref=lang_pref)
                 if purl:
@@ -5125,8 +5143,6 @@ def process_coverart_one(
             logging.debug("Own cover already embedded, skipping: %s", mkv_path.name)
             return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                           ok=True, reason="already_has_cover")
-        if existing and not ours and not overwrite_cover:
-            logging.info("Third-party cover found (came with the file) — replacing: %s", mkv_path.name)
 
         tracks = extract_tracks(mkv_path, meta)
         detected = {detect_language_canonical(t) for t in tracks if t.type == "audio"}
@@ -5167,7 +5183,17 @@ def process_coverart_one(
                                  title, year, imdb_id, lang_pref, mkv_path.name)
                     return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                                   ok=True, reason="dry-run")
-                img, source = fetcher.fetch_movie_poster(title, year, imdb_id, lang_pref)
+                # A poster found by title alone is whichever film the database ranked
+                # first — as wrong as a wrong rename, and just as silent. Pin the film
+                # to one IMDB id first; if that cannot be done, leave the file exactly
+                # as it is rather than embed another film's artwork.
+                pinned, why = movie_identity_for_rename(mkv_path, title or mkv_path.stem, year, imdb_id)
+                if not pinned:
+                    logging.warning("No cover art embedded (film not identified): %s", mkv_path.name)
+                    return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                                  ok=True, reason="film_unidentified",
+                                  details={"note": f"not identified — {why}"})
+                img, source = fetcher.fetch_movie_poster(title, year, pinned, lang_pref)
 
         if img is None:
             logging.warning("No cover art found for: %s", mkv_path.name)
@@ -5175,6 +5201,11 @@ def process_coverart_one(
                           ok=False, reason="no_poster_found")
 
         img = _maybe_downscale_poster(img)
+
+        # Said here, not earlier: a film that cannot be identified, or a title with
+        # no poster, keeps the cover it came with, so nothing is being replaced yet.
+        if existing and not ours and not overwrite_cover:
+            logging.info("Third-party cover found (came with the file) — replacing: %s", mkv_path.name)
 
         # Any pre-existing cover attachments are replaced by the new embed.
         if embed_cover_into_mkv(mkv_path, img, existing, dry_run):
@@ -8053,6 +8084,7 @@ def main() -> int:
                 if report:
                     logging.info("Cover art review: %s", report)
         print_results_table("MP4 to MKV", mp4_results)
+        report_pending_identity()
         return 0 if bad_mp4 == 0 else 1
 
     # --cleanmetadata standalone: --cleantags then --coverart in one command.
@@ -8168,6 +8200,7 @@ def main() -> int:
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
         print_results_table("Rename results", rn_results)
+        report_pending_identity()
         return 0 if bad_rn == 0 else 1
 
     # --subtitles standalone: download missing sidecar subs, then exit.
@@ -8225,6 +8258,7 @@ def main() -> int:
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
         print_results_table("Cover art results", ca_results)
+        report_pending_identity()
         return 0 if bad_ca == 0 else 1
 
     # Ensure the output root exists (not needed for --inplace runs)
