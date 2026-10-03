@@ -896,7 +896,8 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
 
 # Result.reason values that mean "nothing to do" rather than "work done".
 _SKIP_REASONS = ("already_has_cover", "already_covered", "already_named",
-                 "ledger_skip", "dry-run", "unchanged", "film_unidentified")
+                 "ledger_skip", "dry-run", "unchanged", "film_unidentified",
+                 "show_unidentified")
 
 
 def print_results_table(title: str, results: List[Result]) -> None:
@@ -4612,34 +4613,27 @@ class CoverArtFetcher:
 
     def fetch_show_poster(
         self, show_name: str, imdb_id: Optional[str], lang_pref: List[str],
+        tmdb_tv_id: Optional[int] = None,
     ) -> Tuple[Optional[bytes], str]:
-        """One show poster per series per run (cached), embedded into every episode."""
-        cache_key = f"tv:{(imdb_id or show_name or '').lower()}"
+        """
+        One show poster per series per run (cached), embedded into every episode.
+
+        By id only. A series is identified by the caller (tv_show_identity) and
+        passed in; this method used to search by title itself — year-strict, so a
+        renewed show got no poster, and unconstrained when no year was parsed, so
+        a title shared by several series got whichever the database ranked first.
+        """
+        cache_key = f"tv:{(imdb_id or (str(tmdb_tv_id) if tmdb_tv_id else show_name) or '').lower()}"
         with self._lock:
             if cache_key in self._cache:
                 return self._cache[cache_key]
 
         img: Optional[bytes] = None
         source = "none"
-        tmdb_tv_id: Optional[int] = None
-
-        # Strip a trailing (Year) for the title search, but KEEP the year as a
-        # constraint: a bare one-word search ranks by popularity and can return
-        # a same-named show from a different decade.
-        search_name = re.sub(r"\s*\(\d{4}\)\s*$", "", show_name or "").strip()
-        ym = re.search(r"\((\d{4})\)", show_name or "")
-        show_year = ym.group(1) if ym else None
 
         if CFG.TMDB_API_KEY:
-            if imdb_id:
+            if tmdb_tv_id is None and imdb_id:
                 _mv, tmdb_tv_id = self._tmdb_find_by_imdb(imdb_id)
-            if tmdb_tv_id is None and search_name:
-                if show_year:
-                    # Year known: only accept a series from that year — a wrong
-                    # show's poster is worse than no poster.
-                    tmdb_tv_id = resolve_tv_series_tmdb_id(search_name, show_year)
-                else:
-                    tmdb_tv_id = self._tmdb_search(search_name, None, is_tv=True)
             if tmdb_tv_id is not None:
                 purl = self._tmdb_pick_poster_url(tmdb_tv_id, is_tv=True, lang_pref=lang_pref)
                 if purl:
@@ -5171,7 +5165,21 @@ def process_coverart_one(
                                  show_name, imdb_id, lang_pref, mkv_path.name)
                     return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
                                   ok=True, reason="dry-run")
-                img, source = fetcher.fetch_show_poster(show_name, imdb_id, lang_pref)
+                # Pin the series first. A show is identified by an exact title match
+                # (not by year: a renewed show's filename carries the SEASON's air
+                # year, not the year it debuted). When more than one series shares
+                # the title nothing is guessed — the file is left exactly as it is
+                # and the candidates are listed for --pick.
+                bare_show, show_year = split_show_year(show_name or "")
+                tv_id = tv_show_identity(mkv_path.name, bare_show or show_name, show_year, imdb_id,
+                                         own_langs={c for c in detected if c})
+                if tv_id is None and not imdb_id:
+                    logging.warning("No cover art embedded (show not identified): %s", mkv_path.name)
+                    return Result(kind=kind, source_items=[mkv_path], output_path=mkv_path,
+                                  ok=True, reason="show_unidentified",
+                                  details={"note": "not identified — more than one series shares "
+                                                   "this title, or none matches; use --pick"})
+                img, source = fetcher.fetch_show_poster(show_name, imdb_id, lang_pref, tmdb_tv_id=tv_id)
             else:
                 title, year, imdb_id = parse_title_year_imdb_from_filename(mkv_path)
                 if not title:
@@ -7876,7 +7884,7 @@ def main() -> int:
             logging.error("--pick %s", p)
         if problems:
             return 2
-        logging.info("Identifying %d film(s) from your picks.", len(_PICK_SELECTION))
+        logging.info("Identifying %d title(s) from your picks.", len(_PICK_SELECTION))
 
     # --imdb identifies ONE film, so the run must be narrowed to one. Applying it
     # to a whole library would stamp the same id onto every file in it.

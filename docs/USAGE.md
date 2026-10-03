@@ -224,6 +224,8 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 python MediaCleanup.py --coverart --pick 2
 ```
 
+**Shows follow the same rule.** The series is identified by an **exact title match, ignoring the year** — a renewed show's filename carries the year *that season* aired, not the year it debuted, so a year-strict lookup would find nothing for it. One match is used; more than one is never guessed between: the file is left as it is and the candidates are listed (with the language each was made in and its origin country) for `--pick`. The same pick settles the show's language, metadata and poster together.
+
 A film that is identified but has no poster in any source is left untouched in the same way. A local `poster.jpg` next to the file always wins, because that is an explicit choice. A `--dry-run` stays fully offline, so it cannot say in advance which films will be skipped.
 
 **Poster language:** English is always preferred. If no English poster exists, the file's own audio languages (Hindi/Telugu) are tried next, then textless posters.

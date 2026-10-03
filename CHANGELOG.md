@@ -3,6 +3,14 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.9.2] — 2026-10-03
+
+### Fixed
+- **TV posters were found by a title search of their own, with two faults.** A renewed show got **no poster at all**: the lookup required the filename's year to match the series' first-air year, but a release carries the year *that season* aired, so a season released years after the debut missed. And a show whose filename carried no parenthesised year fell through to an unconstrained search that took the top hit, so a title shared by several series got whichever the database ranked first. Cover art now identifies the series with the same exact-title check already used for TV language and metadata, which is year-agnostic and refuses to guess: a renewed show gets its own poster, and a title shared by several series is left **exactly as it is**, with its numbered candidates listed for `--pick`. The poster fetch is id-only, as the film path became in 1.9.1.
+  - A show that already has an IMDB id in the filename, folder or tags is used as-is, and the OMDb source still works from it without a TMDB lookup.
+  - One `--pick` now settles a show's language, metadata and poster together, because all three identify it the same way.
+- "Identifying N film(s) from your picks" now says "title(s)", since picks cover shows too.
+
 ## [1.9.1] — 2026-10-03
 
 ### Fixed
