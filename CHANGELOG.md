@@ -3,6 +3,16 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] — 2026-10-03
+
+### Fixed
+- **A TV episode could be renamed as a different show.** The rename searched TheTVDB by title, and the safeguards around that search all had gaps. The year filter does nothing when the filename carries no year. The name filter ignores punctuation, so `Name!` passed for `Name`. And a final "retry without query" step let FileBot parse the filename itself, which for a title nothing matched landed on whichever show it found: an episode of a show TMDB has never heard of was renamed to an unrelated 2024 series. A series is now **identified before it is renamed**, by the same exact-title check used for TV language, metadata and posters, and FileBot is given the series **by id** — a direct lookup with no search, so there is nothing left for it to substitute. TheTVDB is still the first source, addressed by the series' TheTVDB id; the TMDB entry is the fallback for a series TheTVDB lacks or holds broken.
+  - **When more than one series shares the exact title**, the file is left unrenamed and reported `PARTIAL` with its numbered candidates, and `--pick` resolves it — the same as for films. One pick now settles a show's rename, language, metadata and poster together.
+  - **A show TMDB does not know** is still looked up on TheTVDB, but only by name and year, and the fuzzy retry is gone for series. If that finds nothing the file is reported as not renamed instead of being given another show's name.
+  - A renewed show whose TheTVDB search used to fail now renames by id. Its name carries the series' first-air year, which is also what the dry-run preview predicts.
+  - Applies to the main pipeline, standalone `--rename`, `--cleantags` and `--cleanmetadata`; the dry run reports the same refusal.
+- **A `--pick` for a show was lost partway through a run.** Picks were keyed by the filename's year, which changes when the file is renamed (`Show` becomes `Show (2026)`), so later steps no longer found it. A show is identified by title alone, so its key now ignores the year.
+
 ## [1.9.2] — 2026-10-03
 
 ### Fixed

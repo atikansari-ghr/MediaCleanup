@@ -224,6 +224,8 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 python MediaCleanup.py --coverart --pick 2
 ```
 
+**Shows follow the same rule, for the rename as well.** A series is identified before its episodes are renamed, and FileBot is handed the series by id rather than searching for it, so it cannot land on a similarly named show. When more than one series shares the exact title the file is left unrenamed, reported `PARTIAL` with its candidates, and `--pick` resolves it. A show TMDB does not know is looked up on TheTVDB by name and year only; if that finds nothing the file keeps its name and is reported as not renamed, never given another show's.
+
 **Shows follow the same rule.** The series is identified by an **exact title match, ignoring the year** — a renewed show's filename carries the year *that season* aired, not the year it debuted, so a year-strict lookup would find nothing for it. One match is used; more than one is never guessed between: the file is left as it is and the candidates are listed (with the language each was made in and its origin country) for `--pick`. The same pick settles the show's language, metadata and poster together.
 
 A film that is identified but has no poster in any source is left untouched in the same way. A local `poster.jpg` next to the file always wins, because that is an explicit choice. A `--dry-run` stays fully offline, so it cannot say in advance which films will be skipped.

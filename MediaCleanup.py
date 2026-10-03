@@ -1470,6 +1470,11 @@ def _pending_key(kind: str, title: str, year: Optional[str]) -> str:
     — the file that finally gets renamed may be a remux output living somewhere
     else, and 'kind' keeps a film and a show of the same name from colliding.
     """
+    if kind == "tv":
+        # A show is identified by title alone — its filename year is the season's
+        # air year and changes when the file is renamed ('Show' -> 'Show (2026)'),
+        # so keying on it would make a pick vanish partway through a run.
+        year = None
     return f"{kind}|{(title or '').strip().lower()}|{year or ''}"
 
 
@@ -1923,13 +1928,39 @@ def run_filebot_rename_final_mkv(
     # 'Show 2026' label and leave the attempt unconstrained by year.
     year_filter = _filebot_year_filter(query, db, year=show_year if is_tv_db else None)
 
+    # A series must be identified before it may be renamed. A title search —
+    # even with a year and a name filter — can still land on a different show
+    # (the name filter ignores punctuation, so 'Name!' passes for 'Name', and a
+    # filename with no year has no year to filter on). When more than one series
+    # shares the exact title the file is left alone; otherwise the series id is
+    # handed to FileBot as a direct lookup.
+    tv_pin: Optional[int] = None
+    if is_tv_db and search_q:
+        tv_pin, tv_blocked = tv_identity_for_rename(mkv.name, search_q, show_year)
+        if tv_blocked:
+            logging.warning("Not renaming %s — %s", mkv.name, tv_blocked)
+            _record(False, tv_blocked)
+            return mkv
+
     # Override FileBot's filename-based search with a clean title so junk
     # in the original filename doesn't corrupt the DB lookup result.
     # An IMDB id identifies the title outright: FileBot resolves 'ttNNNNNNN' as a
     # direct lookup rather than a search, so no filter and no fallback can apply
     # — and none should, since a fallback could only substitute a different film.
-    pinned = bool(imdb_id) and not is_tv_db
-    if pinned:
+    pinned = (bool(imdb_id) and not is_tv_db) or bool(tv_pin)
+    if tv_pin:
+        logging.debug("FileBot pinned to series tmdb:%s: %s", tv_pin, mkv.name)
+        r = None
+        for n, cmd in enumerate(pinned_tv_commands(base_cmd, tv_pin)):
+            if n:
+                logging.info("TheTVDB could not serve the series — using the TMDB entry "
+                             "instead: %s", mkv.name)
+            r = run_cmd(cmd, timeout_sec=1200)
+            # 'already named' exits non-zero but is a success; a second source
+            # would only say the same thing.
+            if r.ok or _filebot_skipped_as_already_correct(r.out or ""):
+                break
+    elif pinned:
         logging.debug("FileBot pinned to %s: %s", imdb_id, mkv.name)
         r = run_cmd(base_cmd + ["--q", str(imdb_id)], timeout_sec=1200)
     else:
@@ -1962,11 +1993,16 @@ def run_filebot_rename_final_mkv(
                 logging.info("Retrying as %r: %s", merged_q, mkv.name)
                 r = run_cmd(base_cmd + ["--q", merged_q] + merged_filter, timeout_sec=1200)
 
-            if not r.ok:
+            if not r.ok and not is_tv_db:
                 # Our inferred title can itself be wrong (odd release naming), and
                 # then the query is what blocks the match. Retry once letting FileBot
                 # parse the filename — still year-constrained, so a wrong-year title
                 # is never chosen silently.
+                #
+                # Never for a series: with no name to hold it to, FileBot's own parse
+                # of a title nothing matches lands on whichever show it finds
+                # ('Some.Unknown.Show.S01E01' became an unrelated 2024 series). A
+                # series that cannot be identified is left unrenamed instead.
                 logging.info("FileBot found no match for query %r — retrying without query%s: %s",
                              query, " (year-constrained)" if year_filter else "", mkv.name)
                 r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
@@ -2697,6 +2733,71 @@ def _report_tv_candidates(src_label: str, title: str, year: Optional[str],
     best = next((n for n, c in zip(numbers, candidates) if c.get("id")), numbers[0])
     logging.warning("    -> choose one of these with --pick, e.g. --pick %d", best)
     return numbers
+
+
+_TV_EXT_IDS_CACHE: Dict[int, Dict[str, Any]] = {}
+_TV_EXT_IDS_LOCK = threading.Lock()
+
+
+def tmdb_tv_external_ids(tmdb_id: int) -> Dict[str, Any]:
+    """TheTVDB / IMDB ids of a series, from its TMDB id (cached)."""
+    with _TV_EXT_IDS_LOCK:
+        if tmdb_id in _TV_EXT_IDS_CACHE:
+            return _TV_EXT_IDS_CACHE[tmdb_id]
+    data: Dict[str, Any] = {}
+    try:
+        data = _http_get_json(f"https://api.themoviedb.org/3/tv/{tmdb_id}/external_ids"
+                              f"?api_key={CFG.TMDB_API_KEY}") or {}
+    except Exception as e:
+        logging.debug("Could not fetch external ids for tmdb:%s: %s", tmdb_id, e)
+    with _TV_EXT_IDS_LOCK:
+        _TV_EXT_IDS_CACHE[tmdb_id] = data
+    return data
+
+
+def tv_identity_for_rename(src_label: str, title: str, year: Optional[str],
+                           known_imdb: Optional[str] = None,
+                           own_langs: Optional[Set[str]] = None) -> Tuple[Optional[int], str]:
+    """
+    The TMDB series id to pin a TV rename to, or why it must not be renamed.
+
+    Returns (tmdb_id, "") when the series is identified, (None, reason) when
+    more than one series shares the exact title and none was picked — the
+    caller must then leave the file alone — and (None, "") when TMDB does not
+    know the title at all, in which case the existing TheTVDB search still
+    applies, since a show only TheTVDB carries is not ambiguous, merely absent.
+    """
+    tv_id = tv_show_identity(src_label, title, year, known_imdb, own_langs)
+    if tv_id:
+        return tv_id, ""
+    _none, candidates = resolve_tv_show_tmdb_id(title)
+    if not candidates:
+        return None, ""
+    nums = _already_listed("tv", title, year)
+    listed = "; ".join(
+        f"[{n}] {c['title']} ({c['year']})"
+        + (f" {language_display(c['lang'])}" if c.get("lang") else "")
+        for n, c in list(zip(nums, candidates))[:4])
+    return None, f"pick one — {listed}" if listed else "pick one — several series share this title"
+
+
+def pinned_tv_commands(base_cmd: List[str], tmdb_id: int) -> List[List[str]]:
+    """
+    FileBot commands that look the series up BY ID instead of searching.
+
+    TheTVDB stays the first source, addressed by the series' TheTVDB id; the
+    TMDB entry is the fallback for a series TheTVDB lacks or holds broken. An id
+    is a direct lookup, so no name or year filter applies and no fuzzy retry can
+    substitute a different show — which is the failure a title search had.
+    base_cmd must already carry '--db TheTVDB'.
+    """
+    cmds: List[List[str]] = []
+    tvdb = tmdb_tv_external_ids(tmdb_id).get("tvdb_id")
+    if tvdb:
+        cmds.append(base_cmd + ["--q", str(tvdb)])
+    cmds.append([("TheMovieDB::TV" if a == "TheTVDB" else a) for a in base_cmd]
+                + ["--q", str(tmdb_id)])
+    return cmds
 
 
 _TV_ORIG_LANG_CACHE: Dict[int, Optional[str]] = {}
@@ -5582,7 +5683,16 @@ def process_rename_one(
             query = _bare or None
             db = "TheTVDB"
             fmt = TV_FILEBOT_FORMAT_DIR if target_root else TV_FILEBOT_FORMAT
+            # A series must be identified before it may be renamed — see
+            # tv_identity_for_rename. Ambiguous means leave the file alone.
+            tv_pin: Optional[int] = None
+            if query:
+                tv_pin, tv_blocked = tv_identity_for_rename(mkv.name, query, tv_year)
+                if tv_blocked:
+                    return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                                  reason=tv_blocked)
         else:
+            tv_pin = None
             title, year, _imdb = parse_title_year_imdb_from_filename(mkv)
             if not title:
                 title, year = infer_movie_name_year_from_path(mkv)
@@ -5628,20 +5738,34 @@ def process_rename_one(
             # Direct lookup by id: no filter can improve on it, and no fallback
             # should apply, since a fallback could only find a different film.
             cmd += ["--q", str(pinned_imdb)]
+        elif tv_pin:
+            pass    # the pinned commands below are built from plain_cmd
         elif query:
             cmd += ["--q", query]
             cmd += _filebot_series_name_filter(year_filter, query, db)
         else:
             cmd += year_filter
 
-        r = run_cmd(cmd, timeout_sec=600)
-        out_txt = (r.out or "").strip()
-
         # (In --action test, rc is 1 even on success — judge by the output.)
         def _matched(res: CmdResult, text: str) -> bool:
             return ("[TEST]" in text or "skipped" in text.lower()) if dry_run else res.ok
 
-        if not _matched(r, out_txt) and is_tv and mkv.exists():
+        if tv_pin:
+            # By id, TheTVDB first then the TMDB entry; no search, so no filter
+            # and no fuzzy retry that could substitute a different show.
+            for n, pcmd in enumerate(pinned_tv_commands(plain_cmd, tv_pin)):
+                if n:
+                    logging.info("TheTVDB could not serve the series — using the TMDB entry "
+                                 "instead: %s", mkv.name)
+                r = run_cmd(pcmd, timeout_sec=600)
+                out_txt = (r.out or "").strip()
+                if _matched(r, out_txt) or _filebot_skipped_as_already_correct(out_txt):
+                    break
+        else:
+            r = run_cmd(cmd, timeout_sec=600)
+            out_txt = (r.out or "").strip()
+
+        if not tv_pin and not _matched(r, out_txt) and is_tv and mkv.exists():
             tmdb_cmd = (_filebot_tmdb_tv_cmd(plain_cmd, query or "", tv_year)
                         if is_tv and query else None)
             if tmdb_cmd:
@@ -5663,14 +5787,10 @@ def process_rename_one(
                     r = run_cmd(plain_cmd + ["--q", merged_q] + merged_filter, timeout_sec=600)
                     out_txt = (r.out or "").strip()
 
-                if not _matched(r, out_txt):
-                    # A wrong inferred title blocks the match, so retry once letting
-                    # FileBot parse the filename — still year-constrained, so a
-                    # wrong-year match is never chosen.
-                    logging.info("FileBot found no match for query %r — retrying without query%s: %s",
-                                 query, " (year-constrained)" if year_filter else "", mkv.name)
-                    r = run_cmd(base_cmd, timeout_sec=600)
-                    out_txt = (r.out or "").strip()
+                # No "retry without query" here: this branch is TV-only, and with no
+                # name to hold it to FileBot's own parse of a title nothing matches
+                # lands on whichever show it finds. A series that cannot be
+                # identified is reported as not renamed instead.
 
         if dry_run:
             # FileBot prints '[TEST] from [old] to [new]' — surface it verbatim.
@@ -7431,6 +7551,16 @@ def process_tv_file(
                 selected_audio_langs, exact=_PREVIEW_EXACT)
             if predicted_name:
                 logging.info("[DRY] Final name would be: %s", predicted_name)
+            # Preview the identification too: a series the real run would refuse to
+            # rename must not be previewed as though it had a name.
+            _dry_bare, _dry_year = split_show_year(show_name or "")
+            if _dry_bare and CFG.TMDB_API_KEY:
+                _dry_id, _dry_why = tv_identity_for_rename(src.name, _dry_bare, _dry_year)
+                if _dry_why:
+                    logging.warning("[DRY] Would NOT rename %s — %s", src.name, _dry_why)
+                    predicted_name = None
+                    _rename_outcome["ok"] = False
+                    _rename_outcome["reason"] = _dry_why
 
         # ── SKIP-REMUX / RULE-7 CHECKS ───────────────────────────────────────
         _actual_audio_count = sum(1 for t in tracks if t.type == "audio" and not is_excluded_audio(t))
@@ -7607,6 +7737,7 @@ def process_tv_file(
                 filebot_format=TV_FILEBOT_FORMAT,
                 dry_run=dry_run,
                 query=show_name,
+                outcome=_rename_outcome,
             )
             if fb_path and fb_path.exists() and fb_path != out_done:
                 logging.info("FileBot renamed -> %s", fb_path.name)
@@ -7624,8 +7755,8 @@ def process_tv_file(
         pipeline_embed_cover(out_done, is_tv=True, dry_run=dry_run)
 
         return Result(kind=kind, source_items=[src], output_path=out_done, ok=True,
-                      details={"cmd": r.cmd, "audio_langs": selected_audio_langs,
-                           "predicted": predicted_name})
+                      details=_with_rename_outcome({"cmd": r.cmd, "audio_langs": selected_audio_langs,
+                                                    "predicted": predicted_name}, _rename_outcome))
 
     except FileExistsError as e:
         return Result(kind=kind, source_items=[src], output_path=None, ok=False, reason=str(e))
