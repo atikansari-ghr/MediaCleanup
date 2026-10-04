@@ -3,7 +3,9 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
-## [1.10.0] — 2026-10-03
+## [1.10.0] — 2026-10-04
+
+This release also contains everything in 1.6.1 through 1.9.2 below. Those were development milestones and were never tagged on their own, so 1.10.0 follows 1.6.0 directly.
 
 ### Fixed
 - **A TV episode could be renamed as a different show.** The rename searched TheTVDB by title, and the safeguards around that search all had gaps. The year filter does nothing when the filename carries no year. The name filter ignores punctuation, so `Name!` passed for `Name`. And a final "retry without query" step let FileBot parse the filename itself, which for a title nothing matched landed on whichever show it found: an episode of a show TMDB has never heard of was renamed to an unrelated 2024 series. A series is now **identified before it is renamed**, by the same exact-title check used for TV language, metadata and posters, and FileBot is given the series **by id** — a direct lookup with no search, so there is nothing left for it to substitute. TheTVDB is still the first source, addressed by the series' TheTVDB id; the TMDB entry is the fallback for a series TheTVDB lacks or holds broken.
