@@ -33,6 +33,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -53,7 +54,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Kept in step with the newest entry in CHANGELOG.md; --version reports it and
 # --check-update compares it with the latest GitHub release.
-__version__ = "1.12.0"
+__version__ = "1.12.1"
 GITHUB_REPO = "atikansari-ghr/MediaCleanup"
 
 # Optional dependency: 'rich' enables colored log output and end-of-run summary
@@ -3725,7 +3726,7 @@ def infer_resolution_tag_from_video(track: Track, fallback_filename: Optional[st
             pass
 
     if fallback_filename:
-        m = re.search(r"(?i)(4320|2160|1440|1080|720|576|480|360|240)p", fallback_filename)
+        m = re.search(r"(?i)\b(4320|2160|1440|1080|720|576|480|360|240)p\b", fallback_filename)
         if m:
             return f"{m.group(1)}p"
 
@@ -5069,22 +5070,8 @@ def validate_api_keys() -> Dict[str, str]:
         else:
             status["OMDb"] = "network error"
 
-    if not (CFG.OS_API_KEY and CFG.OS_USERNAME and CFG.OS_PASSWORD):
-        status["OpenSubs"] = "not configured"
-    else:
-        try:
-            payload = json.dumps({"username": CFG.OS_USERNAME, "password": CFG.OS_PASSWORD}).encode("utf-8")
-            req = urllib.request.Request(
-                f"{_OS_API_BASE}/login", data=payload, method="POST",
-                headers={"Api-Key": CFG.OS_API_KEY, "User-Agent": _OS_USER_AGENT,
-                         "Content-Type": "application/json", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            status["OpenSubs"] = "ok" if data.get("token") else "invalid"
-        except urllib.error.HTTPError as e:
-            status["OpenSubs"] = "invalid" if e.code in (401, 403) else "network error"
-        except Exception:
-            status["OpenSubs"] = "network error"
+    # Only the API key is needed for OpenSubtitles; the login is optional (see check_opensubtitles).
+    status["OpenSubs"] = check_opensubtitles()
 
     return status
 
@@ -6236,9 +6223,6 @@ def run_rename_pipeline(
 # Subtitle downloading (--subtitles mode, OpenSubtitles.com REST API)
 # =========================
 
-_OS_API_BASE = "https://api.opensubtitles.com/api/v1"
-# OpenSubtitles requires a descriptive User-Agent identifying the app.
-_OS_USER_AGENT = "MediaCleanup v1.0"
 
 
 
@@ -6286,7 +6270,9 @@ def missing_subtitle_langs(mkv: Path, tracks: List[Track]) -> List[str]:
     embedded: set[str] = set()
     for t in tracks:
         if t.type == "subtitles":
-            embedded.add((t.language or "und")[:2].lower())
+            code = subtitle_lang_iso1(t.language)       # 'ger' -> 'de', not 'ge'
+            if code:
+                embedded.add(code)
 
     missing: List[str] = []
     for lang in CFG.SUB_LANGS:
@@ -6298,127 +6284,565 @@ def missing_subtitle_langs(mkv: Path, tracks: List[Track]) -> List[str]:
     return missing
 
 
+# --- OpenSubtitles.com REST API -------------------------------------------------------
+# What the manual (opensubtitles.stoplight.io, "Getting started") requires, and what this
+# client therefore does:
+#   * Api-Key is the ONLY credential needed to search (unlimited) and to download a few
+#     subtitles a day per IP. A user login (JWT) just raises the download quota. So
+#     username/password are optional here, and a failed login never stops the run.
+#   * The username is the account USERNAME - an email address is refused.
+#   * Every request carries 'User-Agent: AppName vX.Y'.
+#   * Requests should use sorted, lowercase parameters with no default values and no
+#     leading zeros in ids, otherwise every search is answered with a redirect.
+#   * TV episodes are searched with parent_imdb_id + season_number + episode_number.
+#   * After login, later requests must go to the returned base_url, with the token.
+#   * Rate limit: about 5 requests a second (HTTP 429 says when to retry); login is
+#     limited to 1/second, 10/minute, 30/hour and must not be retried after a refusal.
+
+_OS_DEFAULT_HOST = "api.opensubtitles.com"
+_OS_HOSTS = frozenset({"api.opensubtitles.com", "vip-api.opensubtitles.com"})
+_OS_MIN_INTERVAL_S = 0.25            # at most four requests a second, under the documented five
+_OS_MAX_RETRY_WAIT_S = 10.0
+
+
+def _os_user_agent() -> str:
+    return f"MediaCleanup v{__version__}"
+
+
+def os_digits(imdb_id: Optional[str]) -> Optional[str]:
+    """'tt0063350' -> '63350': the API wants the number alone, without leading zeros."""
+    digits = re.sub(r"\D", "", str(imdb_id or ""))
+    return str(int(digits)) if digits else None
+
+
+def build_subtitle_searches(imdb_id: Optional[str], oshash: Optional[str], lang: str, *,
+                            tmdb_id: Optional[int] = None, is_tv: bool = False,
+                            season: Optional[int] = None,
+                            episode: Optional[int] = None) -> List[Dict[str, str]]:
+    """
+    The searches to try, most precise first (at most three), as parameter dicts.
+
+    A moviehash identifies the exact release, an id identifies the title; both are
+    filters, so when the combination finds nothing the looser one is tried. A TV
+    episode is searched by its series (parent id) with season and episode. There is
+    deliberately no search by title: a title is not an identity, and the top hit of a
+    title search can be another film. A hash-only search asks for exact matches only.
+    """
+    lang = (lang or "en").lower()
+    num = os_digits(imdb_id)
+    h = (oshash or "").lower() or None
+    out: List[Dict[str, str]] = []
+
+    def add(**params: Any) -> None:
+        clean = {k: str(v) for k, v in params.items() if v not in (None, "")}
+        if clean not in out:
+            out.append(clean)
+
+    if is_tv:
+        parent = ({"parent_imdb_id": num} if num else
+                  ({"parent_tmdb_id": tmdb_id} if tmdb_id else {}))
+        ep = ({"season_number": season, "episode_number": episode}
+              if season is not None and episode is not None else {})
+        if parent and ep:
+            add(languages=lang, moviehash=h, **parent, **ep)
+            add(languages=lang, **parent, **ep)
+    elif num:
+        add(imdb_id=num, languages=lang, moviehash=h)
+        add(imdb_id=num, languages=lang)
+    if h:
+        add(languages=lang, moviehash=h, moviehash_match="only")
+    return out[:3]
+
+
+def search_query_string(params: Dict[str, str]) -> str:
+    """Parameters sorted by name and URL-encoded - the form that is not redirected."""
+    return urllib.parse.urlencode(sorted(params.items()), quote_via=urllib.parse.quote)
+
+
+def os_login_reason(code: Optional[int], data: Optional[Dict[str, Any]], username: str) -> str:
+    """Why a login failed, in the server's own words plus the commonest mistake."""
+    msg = str((data or {}).get("message") or "").strip()
+    parts = []
+    if code is None:
+        parts.append("OpenSubtitles could not be reached")
+    else:
+        parts.append(f"HTTP {code}" + (f": {msg}" if msg else ""))
+    if "@" in (username or ""):
+        parts.append("the username in [subtitles] looks like an email address - OpenSubtitles needs "
+                     "your username, not your email")
+    return "; ".join(parts)
+
+
+# --- Choosing a subtitle that fits the video --------------------------------------------
+# The search results say nothing about how LONG a subtitle is, so the choice is made in
+# two stages. Before downloading, candidates are scored on what the results do carry
+# (exact-release hash, source, edition, frame rate, a runtime in the release text, ...).
+# After downloading, the subtitle's last cue is compared with the video's duration; if it
+# clearly does not fit, the next-best candidate is tried ONCE (it costs one more download).
+
+# Editions that can change what is on screen or how long it runs. Framing and packaging
+# words (open matte, IMAX, Criterion, 3D) do not change timing, so they are not listed.
+_EDITION_PATTERNS: Dict[str, str] = {
+    "colorized": r"colou?riz?s?ed",
+    "remastered": r"remaster(?:ed)?",
+    "extended": r"extended",
+    "unrated": r"unrated",
+    "directors cut": r"director'?s?[ ._-]?cut",
+    "uncut": r"uncut",
+    "theatrical": r"theatrical",
+    "anniversary": r"anniversary",
+    "restored": r"restor(?:ed|ation)",
+}
+_SOURCE_PATTERNS: Tuple[Tuple[str, str], ...] = (
+    ("bluray", r"blu[ ._-]?ray|\bbrrip\b|\bbdrip\b|\bbd\b|\bremux\b"),
+    ("web", r"\bweb[ ._-]?(?:dl|rip)?\b|\bamzn\b|\bnf\b"),
+    ("hdtv", r"\bhdtv\b|\bpdtv\b"),
+    ("dvd", r"\bdvd(?:rip|scr)?\b"),
+)
+_SUB_MIN_COVERAGE = 0.70        # a full subtitle's last cue is near the end of the video
+_SUB_MAX_FIRST_CUE = 0.35       # ...and its first cue is not past a third of it
+
+
+def edition_words(text: str) -> Set[str]:
+    low = (text or "").lower()
+    return {name for name, pat in _EDITION_PATTERNS.items() if re.search(pat, low)}
+
+
+def release_source(text: str) -> Optional[str]:
+    low = (text or "").lower()
+    for name, pat in _SOURCE_PATTERNS:
+        if re.search(pat, low):
+            return name
+    return None
+
+
+def release_group(text: str) -> Optional[str]:
+    """The release group after the last hyphen ('...X264-AMIABLE' -> 'amiable')."""
+    m = re.search(r"-\s*([A-Za-z0-9]{2,15})\s*(?:\.[A-Za-z0-9]{2,4})?\s*$", (text or "").strip())
+    return m.group(1).lower() if m else None
+
+
+def runtime_hint(text: str) -> Optional[float]:
+    """A film-length runtime written in a release text ('... 1:35:08') in seconds, if any."""
+    for m in re.finditer(r"\b(\d{1,2}):([0-5]\d):([0-5]\d)\b", text or ""):
+        secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        if 20 * 60 <= secs <= 6 * 3600:
+            return float(secs)
+    return None
+
+
+def fmt_hms(seconds: float) -> str:
+    s = int(round(seconds))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+@dataclasses.dataclass
+class SubtitleTarget:
+    """What the video in hand looks like, for choosing a subtitle that fits it."""
+    name: str = ""
+    duration_s: Optional[float] = None
+    fps: Optional[float] = None
+
+
+@dataclasses.dataclass
+class SubtitleCandidate:
+    file_id: int
+    score: float
+    release: str = ""
+    fps: float = 0.0
+    hash_match: bool = False
+    reasons: List[str] = dataclasses.field(default_factory=list)
+
+
+def score_subtitle_candidate(attrs: Dict[str, Any], target: SubtitleTarget
+                             ) -> Tuple[Optional[float], List[str]]:
+    """
+    Score one search result against the video. Returns (score, reasons); a score of
+    None means the result is excluded outright. Only fields the search returns are used.
+    """
+    why: List[str] = []
+    if int(attrs.get("nb_cd") or 1) > 1:
+        return None, ["split over several discs"]
+    if attrs.get("machine_translated"):
+        return None, ["machine-translated"]
+    if attrs.get("foreign_parts_only"):
+        return None, ["foreign parts only"]
+
+    release = str(attrs.get("release") or "")
+    score = 0.0
+
+    def add(points: float, reason: str) -> None:
+        nonlocal score
+        score += points
+        why.append(f"{points:+.0f} {reason}")
+
+    if attrs.get("moviehash_match"):
+        add(1000, "exact release (hash)")
+
+    # source: WEB / BluRay / HDTV / DVD
+    want_src, have_src = release_source(target.name), release_source(release)
+    if want_src and have_src:
+        add(20 if want_src == have_src else -12, f"source {have_src} vs {want_src}")
+
+    # release group
+    want_grp, have_grp = release_group(target.name), release_group(release)
+    if want_grp and have_grp and want_grp == have_grp:
+        add(15, f"same release group {have_grp}")
+
+    # editions: a Colorized or Remastered subtitle is for another cut of the film
+    want_ed, have_ed = edition_words(target.name), edition_words(release)
+    for ed in sorted(have_ed - want_ed):
+        add(-25, f"edition '{ed}' is not in your file")
+    for ed in sorted(have_ed & want_ed):
+        add(20, f"edition '{ed}' matches")
+    for ed in sorted(want_ed - have_ed):
+        add(-10, f"your file is '{ed}'")
+
+    # frame rate: a different rate drifts steadily over the film
+    sub_fps = float(attrs.get("fps") or 0.0)
+    if sub_fps > 0 and target.fps:
+        diff = abs(sub_fps - target.fps)
+        if diff <= 0.01:
+            add(25, f"frame rate {sub_fps:g} matches")
+        elif diff > 0.05:
+            add(-35, f"frame rate {sub_fps:g} vs {target.fps:g}")
+
+    # a runtime written in the release text
+    hint = runtime_hint(release)
+    if hint and target.duration_s:
+        gap = abs(hint - target.duration_s)
+        if gap <= 60:
+            add(30, f"runtime {fmt_hms(hint)} matches")
+        elif gap > target.duration_s * 0.05:
+            add(-40, f"runtime {fmt_hms(hint)} vs {fmt_hms(target.duration_s)}")
+
+    if attrs.get("hearing_impaired"):
+        add(-10, "hearing-impaired")
+    if attrs.get("ai_translated"):
+        add(-15, "AI-translated")
+    if attrs.get("from_trusted"):
+        add(8, "trusted uploader")
+    try:
+        rating = float(attrs.get("ratings") or 0.0)
+        if rating > 0:
+            add(min(10.0, rating), "rating")
+        downloads = int(attrs.get("download_count") or 0)
+        if downloads > 0:
+            add(min(10.0, 3.0 * math.log10(1 + downloads)), f"{downloads} downloads")
+    except (TypeError, ValueError):
+        pass
+    return score, why
+
+
+def verify_subtitle_fit(raw: bytes, duration_s: Optional[float]) -> Tuple[bool, str, str]:
+    """
+    Does this subtitle fit a video of this length? Returns (fits, reason, cleaned SRT).
+
+    The advertising cues the release injected at the start and end are stripped first,
+    because they can run past the end of the video. A subtitle fits when its last cue
+    is near the end of the video, not far beyond it, and its first cue is not late.
+    It catches a wrong cut, a wrong film or a truncated file; a small frame-rate drift
+    is caught earlier, by comparing frame rates before downloading.
+    """
+    text, _charset = _decode_subtitle_bytes(raw)
+    cleaned, _removed = clean_srt_advertisements(text, duration_s)
+    blocks = parse_srt(cleaned)
+    if not blocks:
+        return False, "not a readable SRT file", ""
+    starts = [b[0] for b in blocks if b[0] is not None]
+    ends = [b[1] for b in blocks if b[1] is not None]
+    if not starts or not ends:
+        return False, "its timing lines could not be read", ""
+    if not duration_s:
+        return True, "length not checked (the video's duration is unknown)", cleaned
+    min_cues = int(min(20, max(5, duration_s / 120)))
+    if len(blocks) < min_cues:
+        return False, f"only {len(blocks)} lines for a {fmt_hms(duration_s)} video", ""
+    last_end, first_start = max(ends), min(starts)
+    tolerance = max(30.0, duration_s * 0.01)
+    if last_end > duration_s + tolerance:
+        return False, f"runs to {fmt_hms(last_end)} but the video is only {fmt_hms(duration_s)}", ""
+    if last_end < duration_s * _SUB_MIN_COVERAGE:
+        return False, (f"ends at {fmt_hms(last_end)}, only {last_end / duration_s:.0%} of the "
+                       f"video's {fmt_hms(duration_s)}"), ""
+    if first_start > duration_s * _SUB_MAX_FIRST_CUE:
+        return False, f"its first line is at {fmt_hms(first_start)}", ""
+    return True, (f"fits: ends at {fmt_hms(last_end)} of {fmt_hms(duration_s)} "
+                  f"({last_end / duration_s:.0%})"), cleaned
+
+
+def video_fps(meta: Dict[str, Any]) -> Optional[float]:
+    """The first video track's frame rate, from its default frame duration."""
+    for t in meta.get("tracks") or []:
+        if t.get("type") == "video":
+            dd = (t.get("properties") or {}).get("default_duration")
+            try:
+                return round(1e9 / float(dd), 3) if dd else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                return None
+    return None
+
+
+def subtitle_lang_iso1(code: str) -> Optional[str]:
+    """A track's language as the two-letter code the settings use ('ger' -> 'de', 'eng' -> 'en')."""
+    c = (code or "").lower().strip()
+    if not c or c == "und":
+        return None
+    if len(c) == 2:
+        return c
+    return iso2_to_iso1(c)
+
+
+def subtitle_identity(mkv: Path, is_tv: bool, show_title: Optional[str],
+                      show_year: Optional[str]) -> Tuple[Optional[str], Optional[int], str]:
+    """
+    Which title is this, for the subtitle search? Returns (imdb id, TMDB series id, problem).
+
+    An id already on the file (name, folder or tags) is used as-is. Otherwise the title
+    is identified the same way a rename identifies it; one that cannot be pinned to a
+    single title yields no id and the reason, never a guess.
+    """
+    known = (extract_imdb_id_from_tv_path(mkv) if is_tv else extract_imdb_id_from_movie_path(mkv)) \
+        or extract_imdb_from_mkv_tags(mkv)
+    if known:
+        return known, None, ""
+    if is_tv:
+        tid = tv_show_identity(mkv.name, show_title or "", show_year, None)
+        if tid:
+            imdb = str(tmdb_tv_external_ids(tid).get("imdb_id") or "")
+            return (imdb if re.fullmatch(r"tt\d{7,10}", imdb) else None), tid, ""
+        return None, None, "the show could not be identified, so no subtitle search was made by title"
+    title, year = infer_movie_name_year_from_path(mkv)
+    ident = movie_identity_chain(mkv, title, year, None)
+    if ident.imdb:
+        return ident.imdb, None, ""
+    return None, None, ident.reason
+
+
 class SubtitleFetcher:
     """
-    OpenSubtitles.com REST client. Thread-safe; logs in once (JWT), searches by
-    moviehash + IMDB id, downloads best match, and stops the whole run
-    gracefully when the daily download quota is exhausted.
+    OpenSubtitles.com REST client. Thread-safe and paced. Searches with the Api-Key
+    alone; logs in (once) only when a username and password are configured, to raise
+    the download quota; stops the run gracefully when the quota is used up.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()          # login state
+        self._pace_lock = threading.Lock()     # request spacing
+        self._last_request = 0.0
         self._token: Optional[str] = None
-        self._login_failed = False
+        self._host = _OS_DEFAULT_HOST
+        self._login_tried = False
+        self.login_problem = ""                # why the login failed, if it did
         self.quota_exhausted = False
+        self.stop_reason = ""                  # why downloads stopped (quota, key refused)
         self.remaining: Optional[int] = None
+        self._noted: Set[str] = set()
 
-    def _headers(self, with_auth: bool = False) -> Dict[str, str]:
-        h = {"Api-Key": CFG.OS_API_KEY, "User-Agent": _OS_USER_AGENT,
-             "Content-Type": "application/json", "Accept": "application/json"}
-        if with_auth and self._token:
-            h["Authorization"] = f"Bearer {self._token}"
+    # -- plumbing --------------------------------------------------------------------
+
+    def _note_once(self, level: int, msg: str) -> None:
+        with self._lock:
+            if msg in self._noted:
+                return
+            self._noted.add(msg)
+        logging.log(level, "%s", msg)
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Api-Key": CFG.OS_API_KEY, "User-Agent": _os_user_agent(),
+             "Content-Type": "application/json", "Accept": "*/*"}
+        if self._token:
+            h["Authorization"] = f"Bearer {self._token}"      # the manual: send it with every request
         return h
 
-    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None,
-                 with_auth: bool = False) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-        url = f"{_OS_API_BASE}{path}"
+    def _pace(self) -> None:
+        with self._pace_lock:
+            wait = self._last_request + _OS_MIN_INTERVAL_S - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request = time.monotonic()
+
+    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None
+                 ) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        """(status, parsed JSON) - the JSON of an error answer too, since it holds the reason."""
+        url = f"https://{self._host}/api/v1{path}"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        try:
-            req = urllib.request.Request(url, data=data, method=method,
-                                         headers=self._headers(with_auth))
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as e:
-            body = ""
+        for attempt in range(4):
+            self._pace()
             try:
-                body = e.read().decode("utf-8", errors="replace")[:300]
-            except Exception:
-                pass
-            logging.debug("OpenSubtitles %s %s -> %s %s", method, path, e.code, body)
-            return e.code, None
-        except Exception as e:
-            logging.debug("OpenSubtitles %s %s failed: %s", method, path, e)
-            return None, None
+                req = urllib.request.Request(url, data=data, method=method, headers=self._headers())
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as e:
+                body: Optional[Dict[str, Any]] = None
+                try:
+                    parsed = json.loads(e.read().decode("utf-8", errors="replace"))
+                    body = parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    pass
+                logging.debug("OpenSubtitles %s %s -> %s %s", method, path, e.code, body)
+                if e.code == 429 and attempt < 3:
+                    try:
+                        wait = float(e.headers.get("Retry-After") or e.headers.get("ratelimit-reset") or 2)
+                    except ValueError:
+                        wait = 2.0
+                    logging.debug("OpenSubtitles rate limit - waiting %.0fs", wait)
+                    time.sleep(min(max(wait, 1.0), _OS_MAX_RETRY_WAIT_S))
+                    continue
+                return e.code, body
+            except Exception as e:
+                logging.debug("OpenSubtitles %s %s failed: %s", method, path, e)
+                return None, None
+        return 429, None
+
+    # -- login (optional) -------------------------------------------------------------
 
     def _ensure_login(self) -> bool:
+        """True when logged in. Never needed: the Api-Key alone still searches and downloads a few a day."""
         with self._lock:
             if self._token:
                 return True
-            if self._login_failed:
+            if self._login_tried or not (CFG.OS_USERNAME and CFG.OS_PASSWORD):
                 return False
-            code, data = self._request("POST", "/login",
-                                       {"username": CFG.OS_USERNAME, "password": CFG.OS_PASSWORD})
-            if code == 200 and data and data.get("token"):
-                self._token = data["token"]
-                user = data.get("user") or {}
-                allowed = user.get("allowed_downloads")
-                logging.info("OpenSubtitles login OK (level=%s, allowed downloads/day=%s)",
-                             user.get("level", "?"), allowed)
-                return True
-            self._login_failed = True
-            logging.error("OpenSubtitles login failed (HTTP %s) — check [subtitles] "
-                          "username/password/api_key in %s", code, CONFIG_FILE.name)
-            return False
+            self._login_tried = True       # a refused login is not retried: it is the "expensive" call
+        code, data = self._request("POST", "/login",
+                                   {"username": CFG.OS_USERNAME, "password": CFG.OS_PASSWORD})
+        if code == 200 and data and data.get("token"):
+            with self._lock:
+                self._token = str(data["token"])
+                host = str(data.get("base_url") or "")
+                if host in _OS_HOSTS:
+                    self._host = host       # the manual: continue on the host the login names
+            user = data.get("user") or {}
+            logging.info("OpenSubtitles login OK (level=%s, allowed downloads/day=%s)",
+                         user.get("level", "?"), user.get("allowed_downloads"))
+            return True
+        self.login_problem = os_login_reason(code, data, CFG.OS_USERNAME)
+        self._note_once(logging.WARNING,
+                        f"OpenSubtitles login failed ({self.login_problem}). Carrying on with the API "
+                        "key alone: searches work, but only a few downloads a day are allowed. "
+                        "Fix username/password in [subtitles] to raise that.")
+        return False
 
-    def search_best(self, mkv: Path, imdb_id: Optional[str], lang_iso1: str) -> Optional[int]:
-        """Return the best matching subtitle file_id, or None."""
-        params = [f"languages={lang_iso1}"]
-        oshash = compute_oshash(mkv)
-        if oshash:
-            params.append(f"moviehash={oshash}")
-        if imdb_id:
-            params.append(f"imdb_id={imdb_id.lstrip('tT')}")
-        if not oshash and not imdb_id:
-            # Last resort: query by cleaned filename
-            title, _year = infer_movie_name_year_from_path(mkv)
-            if not title:
-                return None
-            params.append(f"query={urllib.parse.quote(title)}")
+    # -- search ------------------------------------------------------------------------
 
-        code, data = self._request("GET", f"/subtitles?{'&'.join(params)}")
-        items = (data or {}).get("data") or []
-        if not items:
-            return None
+    def search_candidates(self, mkv: Path, imdb_id: Optional[str], lang_iso1: str,
+                          target: SubtitleTarget, *, tmdb_id: Optional[int] = None,
+                          is_tv: bool = False, season: Optional[int] = None,
+                          episode: Optional[int] = None) -> List[SubtitleCandidate]:
+        """Every subtitle that could fit, best first. Searching costs no download quota."""
+        searches = build_subtitle_searches(imdb_id, compute_oshash(mkv), lang_iso1, tmdb_id=tmdb_id,
+                                           is_tv=is_tv, season=season, episode=episode)
+        if not searches:
+            return []
+        self._ensure_login()        # before searching: a VIP host only answers with the token
+        found: Dict[int, SubtitleCandidate] = {}
+        for params in searches:
+            _code, data = self._request("GET", "/subtitles?" + search_query_string(params))
+            for it in (data or {}).get("data") or []:
+                attrs = it.get("attributes") or {}
+                files = attrs.get("files") or []
+                if not files or not files[0].get("file_id"):
+                    continue
+                file_id = int(files[0]["file_id"])
+                if file_id in found:
+                    continue
+                score, why = score_subtitle_candidate(attrs, target)
+                if score is None:
+                    logging.debug("Subtitle %s left out: %s", file_id, why[0])
+                    continue
+                found[file_id] = SubtitleCandidate(
+                    file_id=file_id, score=score, release=str(attrs.get("release") or ""),
+                    fps=float(attrs.get("fps") or 0.0), hash_match=bool(attrs.get("moviehash_match")),
+                    reasons=why)
+            if len(found) >= 2:      # enough to pick from, and to fall back on once
+                break
+        return sorted(found.values(), key=lambda c: -c.score)
 
-        def rank(it: Dict[str, Any]) -> Tuple[int, int, int]:
-            a = it.get("attributes") or {}
-            return (0 if a.get("moviehash_match") else 1,
-                    0 if a.get("from_trusted") else 1,
-                    -int(a.get("download_count") or 0))
+    # -- download ----------------------------------------------------------------------
 
-        for it in sorted(items, key=rank):
-            files = (it.get("attributes") or {}).get("files") or []
-            if files and files[0].get("file_id"):
-                return int(files[0]["file_id"])
-        return None
+    def _stop(self, reason: str) -> None:
+        self.quota_exhausted = True
+        self.stop_reason = reason
+        self._note_once(logging.WARNING, f"OpenSubtitles: {reason} - the remaining files are skipped.")
 
     def download(self, file_id: int) -> Optional[bytes]:
-        """Download one subtitle; tracks remaining quota from the response."""
-        if self.quota_exhausted or not self._ensure_login():
+        """Download one subtitle; tracks the remaining quota from the answer."""
+        if self.quota_exhausted:
             return None
-        code, data = self._request("POST", "/download", {"file_id": file_id}, with_auth=True)
+        self._ensure_login()
+        code, data = self._request("POST", "/download", {"file_id": file_id})
+        msg = str((data or {}).get("message") or "").strip()
+        if code in (401, 403, 500) and self._token and "invalid" in msg.lower():
+            # The login token lasts 24 hours; a long run can outlive it. Log in once more.
+            with self._lock:
+                self._token, self._login_tried = None, False
+            if self._ensure_login():
+                code, data = self._request("POST", "/download", {"file_id": file_id})
+                msg = str((data or {}).get("message") or "").strip()
         if code == 406 or (data and isinstance(data.get("remaining"), int) and data["remaining"] < 0):
-            self.quota_exhausted = True
-            logging.warning("OpenSubtitles daily download quota EXHAUSTED — remaining files skipped. "
-                            "Quota resets in ~24h (UTC).")
+            tail = "" if self._token else " Logging in (username and password in [subtitles]) raises the daily limit."
+            self._stop(f"daily download quota used up ({msg or 'HTTP 406'}).{tail}")
+            return None
+        if code in (401, 403):
+            if self._token:
+                self._stop(f"the download was refused (HTTP {code}{': ' + msg if msg else ''})")
+            else:
+                self._stop(f"the download was refused with the API key alone (HTTP {code}"
+                           f"{': ' + msg if msg else ''}) - either the key is wrong or its few free "
+                           "downloads for this IP today are used up")
             return None
         if not data or not data.get("link"):
+            logging.warning("OpenSubtitles download gave no link (HTTP %s%s)", code, f": {msg}" if msg else "")
             return None
         if isinstance(data.get("remaining"), int):
             self.remaining = data["remaining"]
             if self.remaining <= 0:
-                self.quota_exhausted = True
+                self.quota_exhausted, self.stop_reason = True, "daily download quota used up"
         return _http_get_bytes(data["link"])
+
+
+def check_opensubtitles() -> str:
+    """
+    The status line for --validate-keys / --self-check.
+
+    Search and the info endpoints answer even to a made-up key, so a key can only
+    be confirmed by a login (which needs the username and password) or by a real
+    download. Without a login this says so plainly instead of claiming "ok".
+    """
+    if not CFG.OS_API_KEY:
+        return "not configured"
+    if not (CFG.OS_USERNAME and CFG.OS_PASSWORD):
+        return ("ok - API key only (no login set): search is unlimited and a few downloads a day work; "
+                "the key itself can only be confirmed by a download. Add username/password to log in")
+    f = SubtitleFetcher()
+    if f._ensure_login():
+        return "ok"
+    msg = f.login_problem
+    low = msg.lower()
+    if "api key" in low or "api-key" in low:
+        return "invalid"
+    if "could not be reached" in msg:
+        return "network error"
+    return f"ok - API key only: the login was refused ({msg}); fix username/password to raise the download limit"
 
 
 def process_subtitles_one(mkv: Path, is_tv: bool, fetcher: SubtitleFetcher, dry_run: bool) -> Result:
     """
     Download missing subtitles for one MKV as sidecar .srt files.
       1. Skip languages already covered (embedded track or existing sidecar).
-      2. Search by moviehash + IMDB id (best-ranked result wins).
-      3. Save as '<mkv stem>.srt' (extra languages get .<iso2>.srt suffix).
+      2. Identify the title (an id on the file, or the same identification a rename uses).
+      3. Search, score the candidates against the video, download the best.
+      4. Check it against the video's duration. If it clearly does not fit, try the
+         next-best candidate ONCE; if that fails too, save nothing and say why.
+      5. Strip advertising cues and save '<mkv stem>.srt' (extra languages: .<iso2>.srt).
     """
     kind = "subtitles"
+
+    def blocked() -> Result:
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                      reason=fetcher.stop_reason or "quota_exhausted", details={"blocked": True})
+
     try:
         meta = mkvmerge_identify_json(mkv)
         tracks = extract_tracks(mkv, meta)
@@ -6433,40 +6857,73 @@ def process_subtitles_one(mkv: Path, is_tv: bool, fetcher: SubtitleFetcher, dry_
             return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="dry-run")
 
         if fetcher.quota_exhausted:
-            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
-                          reason="quota_exhausted")
+            return blocked()
 
-        imdb_id = (extract_imdb_id_from_tv_path(mkv) if is_tv
-                   else extract_imdb_id_from_movie_path(mkv)) or extract_imdb_from_mkv_tags(mkv)
+        duration = _container_duration_s(meta)
+        target = SubtitleTarget(name=mkv.stem, duration_s=duration, fps=video_fps(meta))
+
+        # An episode is searched by its series id with season and episode numbers; the
+        # series id alone would only find the show's own entry, not this episode.
+        season = episode = None
+        show_title: Optional[str] = None
+        show_year: Optional[str] = None
+        if is_tv:
+            show_label, s_str, e_str, _ep_title = infer_tv_components(mkv)
+            season = int(s_str[1:]) if s_str else None
+            episode = int(e_str[1:]) if e_str else None
+            show_title, show_year = split_show_year(show_label or "")
+        imdb_id, tmdb_id, problem = subtitle_identity(mkv, is_tv, show_title or None, show_year)
 
         got: List[str] = []
+        notes: List[str] = []
         for lang in missing:
-            file_id = fetcher.search_best(mkv, imdb_id, lang)
-            if file_id is None:
-                logging.info("No %s subtitle found for: %s", lang, mkv.name)
+            cands = fetcher.search_candidates(mkv, imdb_id, lang, target, tmdb_id=tmdb_id, is_tv=is_tv,
+                                              season=season, episode=episode)
+            if not cands:
+                why = problem or f"no {lang} subtitle found"
+                logging.info("No %s subtitle for %s: %s", lang, mkv.name, why)
+                notes.append(why)
                 continue
-            data = fetcher.download(file_id)
-            if data is None:
+            rejected: List[str] = []
+            saved = False
+            for attempt, cand in enumerate(cands[:2]):          # the best, then the next-best ONCE
                 if fetcher.quota_exhausted:
                     break
-                logging.warning("Subtitle download failed (%s): %s", lang, mkv.name)
-                continue
-            dst = subtitle_sidecar_path(mkv, lang)
-            dst.write_bytes(data)
-            got.append(lang)
-            logging.info("Subtitle saved (%s%s): %s",
-                         lang,
-                         f", quota left: {fetcher.remaining}" if fetcher.remaining is not None else "",
-                         dst.name)
+                if attempt:
+                    logging.info("Trying the next-best %s subtitle (uses one more download): %s",
+                                 lang, mkv.name)
+                logging.debug("Subtitle candidate %s score %.0f: %s | %s", cand.file_id, cand.score,
+                              cand.release, "; ".join(cand.reasons))
+                data = fetcher.download(cand.file_id)
+                if data is None:
+                    if fetcher.quota_exhausted:
+                        break
+                    rejected.append("the download failed")
+                    continue
+                fits, why, cleaned = verify_subtitle_fit(data, duration)
+                if not fits:
+                    logging.warning("%s subtitle for %s does not fit the video (%s): %s",
+                                    lang, mkv.name, why, cand.release or cand.file_id)
+                    rejected.append(why)
+                    continue
+                dst = subtitle_sidecar_path(mkv, lang)
+                dst.write_text(cleaned, encoding="utf-8", newline="\n")
+                got.append(lang)
+                saved = True
+                logging.info("Subtitle saved (%s%s%s): %s", lang,
+                             f", quota left: {fetcher.remaining}" if fetcher.remaining is not None else "",
+                             f", {why}" if why else "", dst.name)
+                break
+            if not saved and not fetcher.quota_exhausted:
+                notes.append(f"no {lang} subtitle fit the video ({'; '.join(rejected)})")
 
         if got:
             return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
-                          details={"langs": got})
+                          details={"langs": got, **({"notes": notes} if notes else {})})
         if fetcher.quota_exhausted:
-            return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
-                          reason="quota_exhausted")
+            return blocked()
         return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
-                      reason=f"no subtitles found ({', '.join(missing)})")
+                      reason="; ".join(notes) or f"no subtitles found ({', '.join(missing)})")
 
     except Exception as e:
         logging.exception("Subtitles failed: %s", mkv.name)
@@ -6486,11 +6943,22 @@ def run_subtitles_pipeline(
     movies_root = movies_root or CFG.MOVIES_ROOT
     tv_root = tv_root or CFG.TV_ROOT
 
-    if not dry_run and not (CFG.OS_API_KEY and CFG.OS_USERNAME and CFG.OS_PASSWORD):
-        logging.error("--subtitles requires api_key, username, and password in the "
-                      "[subtitles] section of %s.", CONFIG_FILE.name)
+    # Only the API key is required. A username and password are optional: they log in,
+    # which raises the daily download limit, but searching and a few downloads a day
+    # work with the key alone.
+    if not dry_run and not CFG.OS_API_KEY:
+        logging.error("--subtitles requires api_key in the [subtitles] section of %s "
+                      "(a free consumer key from opensubtitles.com/en/consumers).", CONFIG_FILE.name)
         return [Result(kind="subtitles", source_items=[], output_path=None, ok=False,
-                       reason="missing OpenSubtitles credentials")]
+                       reason="missing OpenSubtitles api_key")]
+    if not dry_run and not (CFG.OS_USERNAME and CFG.OS_PASSWORD):
+        logging.info("No username/password in [subtitles]: using the API key alone (search is "
+                     "unlimited, but only a few downloads a day are allowed). Add them to log in "
+                     "and raise that limit.")
+    elif not dry_run and "@" in CFG.OS_USERNAME:
+        logging.warning("The [subtitles] username looks like an email address. OpenSubtitles needs "
+                        "your username, not your email - the login will be refused until it is fixed "
+                        "(the API key alone still works meanwhile).")
 
     movie_set: set[Path] = set(apply_scan_filters(scan_mkvs(movies_root), movies_root,
                                                   filters, "subtitles")) if do_movies else set()
@@ -6846,8 +7314,8 @@ SIDECAR_SUB_EXTS: Tuple[str, ...] = (".srt",)
 # to strip those names from filenames, and are folded in at runtime below.
 _AD_PATTERNS = re.compile(
     r"(?i)(?:"
-    r"www\.[a-z0-9-]+\.[a-z]{2,}"          # bare web addresses
-    r"|[a-z0-9-]+\.(?:com|net|org|tv|cat|bz|gg|me|to|in|xyz|top|club|site)"
+    r"\bwww\.[a-z0-9-]+\.[a-z]{2,}"          # bare web addresses
+    r"|\b[a-z0-9-]+\.(?:com|net|org|tv|cat|bz|gg|me|to|in|xyz|top|club|site)\b"
     r"|downloaded\s+from|please\s+visit|visit\s+(?:us|our)"
     r"|subtitles?\s+by\s+\S+|advertise\s+your|support\s+us"
     r"|official\s+\S+\s+(?:movies?|site)"
@@ -10460,15 +10928,19 @@ def _main() -> int:
         ok_st = sum(1 for r in st_results if r.ok)
         bad_st = sum(1 for r in st_results if not r.ok)
         covered = sum(1 for r in st_results if r.ok and r.reason == "already_covered")
-        quota = sum(1 for r in st_results if not r.ok and r.reason == "quota_exhausted")
+        quota = sum(1 for r in st_results if not r.ok and r.details.get("blocked"))
         logging.info("subtitles summary: total=%d OK=%d (already covered: %d) failed=%d (quota-blocked: %d)",
                      len(st_results), ok_st, covered, bad_st, quota)
         if bad_st:
             for r in st_results:
-                if not r.ok and r.reason != "quota_exhausted":
+                if not r.ok and not r.details.get("blocked"):
                     logging.error("  FAILED: %s | %s",
                                   r.source_items[0].name if r.source_items else "?", r.reason)
+        blocked_why = next((r.reason for r in st_results if r.details.get("blocked")), "")
+        if blocked_why:
+            logging.warning("Downloads stopped: %s", blocked_why)
         print_results_table("Subtitle results", st_results)
+        report_pending_identity()       # a title that could not be identified lists numbered candidates
         return 0 if bad_st == 0 else 1
 
     # --coverart standalone: scan roots, embed cover art in-place, then exit.

@@ -131,12 +131,12 @@ Verify your keys anytime with `python MediaCleanup.py --validate-keys`.
 
 ## `[subtitles]`
 
-Credentials for the `--subtitles` mode (OpenSubtitles.com REST API). All three credentials are required for downloads; without them the mode refuses to run (dry-run works regardless).
+Settings for the `--subtitles` mode (OpenSubtitles.com REST API). **Only `api_key` is required.** It alone can search without limit and download 5 subtitles per IP address per day; a login raises the download limit. Without an `api_key` the mode refuses to run (dry-run works regardless).
 
-| Key | Description |
-|---|---|
-| `api_key` | OpenSubtitles API key — register a consumer at <https://www.opensubtitles.com/en/consumers>. |
-| `username` / `password` | Your opensubtitles.com account login (downloads are per-user; free ≈ 20/day, VIP ≈ 1000/day). |
+| Key | Required | Description |
+|---|---|---|
+| `api_key` | **Yes** | OpenSubtitles API key — register a consumer at <https://www.opensubtitles.com/en/consumers>. Use your own, and do not share it. |
+| `username` / `password` | No | Your opensubtitles.com account login. Optional: it logs in, which raises the daily download limit (free ≈ 20, VIP up to 1000). The `username` must be your **username, not your email** — an email is refused. If the login fails the run carries on with the API key alone and says why. |
 | `languages` | List of ISO 639-1 codes to download, default `["en"]`. One language → sidecar named `<mkv stem>.srt`; extra languages get `.hin.srt`-style suffixes. |
 
 ---

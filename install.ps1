@@ -344,11 +344,29 @@ try {
     Ensure-Python
 
     $existing = Test-Path (Join-Path $InstallDir 'MediaCleanup.py')
+    $needFiles = $true
     if ($existing -and -not $FromDir) {
         Step 'An install already exists here - updating it'
         $rc = Invoke-Py @((Join-Path $InstallDir 'MediaCleanup.py'), '--update', '--yes')
-        if ($rc -ne 0 -and $rc -ne 5) { throw 'The update did not complete.' }
-    } else {
+        if ($rc -eq 0 -or $rc -eq 5) {
+            $needFiles = $false
+        } elseif ($rc -eq 2) {
+            # Exit 2 is argparse refusing the flag: this install is older than the self-updater
+            # (v1.11.0 and earlier). Replace its files from the latest release instead; the
+            # release holds no MediaCleanup.toml, so the config is kept.
+            Warn 'This install is older than the built-in updater, so its files are replaced from the latest release instead (your config is kept).'
+            $bk = Join-Path $InstallDir ('backup\pre-installer-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            New-Item -ItemType Directory -Force -Path $bk | Out-Null
+            foreach ($f in 'MediaCleanup.py', 'MediaCleanup.example.toml') {
+                $src = Join-Path $InstallDir $f
+                if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination $bk -Force }
+            }
+            Ok "previous files copied to $bk"
+        } else {
+            throw 'The update did not complete.'
+        }
+    }
+    if ($needFiles) {
         Install-Files
         if (-not $FromDir) {
             Step 'Verifying every file against the hashes GitHub published for this release'

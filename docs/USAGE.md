@@ -449,12 +449,73 @@ Details: requires exactly one of `--movies`/`--tv` (different databases + format
 
 ## Subtitles
 
-`--subtitles` downloads missing subtitles from OpenSubtitles.com as **sidecar `.srt` files** — no remux, media streams untouched. Requires `api_key`, `username`, and `password` in the `[subtitles]` TOML section (free account ≈ 20 downloads/day, VIP ≈ 1000/day; the log shows your remaining quota after each download and the run stops gracefully when it's exhausted).
+`--subtitles` downloads missing subtitles from OpenSubtitles.com as **sidecar `.srt` files** — no remux, media streams untouched. The log shows your remaining quota after each download, and the run stops gracefully when it is used up.
+
+**Only the API key is required.** Per OpenSubtitles' own manual, the key alone can search without limit and download **5 subtitles per IP address per day**. Adding your account's `username` and `password` logs you in, which raises the download limit:
+
+| Setup | Search | Downloads per day |
+|---|---|---|
+| `api_key` only | unlimited | 5 per IP address |
+| `api_key` + `username` + `password` (free account) | unlimited | about 20 |
+| VIP account | unlimited | up to 1000 |
+
+Download counters reset at midnight UTC.
+
+> [!IMPORTANT]
+> The `username` is your OpenSubtitles **username, not your email address**. A login with an email is refused (HTTP 400: *"remember to use your username and not your email"*). If the login fails for any reason the run **carries on with the API key alone** and tells you why, in the server's own words.
+
+> [!NOTE]
+> OpenSubtitles asks that an application use its own API key and warns against apps that make each user create one. This is a script you run yourself, with your own consumer key from <https://www.opensubtitles.com/en/consumers>; do not share that key. If you ever distribute MediaCleanup to others, read the integrator terms linked from the [manual](https://opensubtitles.stoplight.io/docs/opensubtitles-api/e3750fd63a100-getting-started) first.
 
 - **Naming**: single configured language → exact MKV stem + `.srt` (`Night of the Living Dead (1968) - tt0063350 - ... - [Hindi + English].srt`). Extra languages get a suffix: `.hin.srt`, `.tel.srt`.
 - **Languages**: `[subtitles] languages = ["en"]` (ISO 639-1; English is the default).
 - **Skips** files already covered — embedded subtitle track in the wanted language OR an existing sidecar.
-- **Matching**: file hash (identifies the exact release — best sync) + IMDB ID, ranked by hash-match → trusted uploader → download count.
+### How a subtitle is found and chosen
+
+The service's search results say nothing about how *long* a subtitle is, so the choice is made in two stages: **score before downloading, verify after.**
+
+**1. Which title is this?** An id already on the file (its name, folder or tags) is used as-is. Otherwise the title is identified the way a rename identifies it. A film that cannot be pinned to **one** title is skipped with the reason — **there is no search by title alone**, because the top hit of a title search can be another film. An exact-release hash match is still allowed, since that is an exact match and not a guess.
+
+**2. Search** (free — searching uses no download quota). At most three searches, most precise first:
+
+| | 1st | 2nd | 3rd |
+|---|---|---|---|
+| **Film** | id + file hash | id alone | exact-release hash only |
+| **Episode** | series id + season + episode (+ hash) | series id + season + episode | exact-release hash only |
+
+An episode is searched by its **series** id with the season and episode from the filename — the series id alone would only find the show's own entry, not the episode. The TMDB series id is used when no IMDB id is known.
+
+**3. Score the candidates before downloading**, using only what the results carry:
+
+| Signal | Effect |
+|---|---|
+| Exact-release **hash** match | Decisive: beats any amount of popularity |
+| **Source** (WEB / BluRay / HDTV / DVD) matches your file | Up if it matches, down if it differs |
+| **Edition** words (Colorized, Remastered, Extended, Unrated, Director's Cut, Uncut, Theatrical, Anniversary, Restored) | Up if shared; down if the subtitle is for an edition your file is not |
+| **Frame rate** | Up if it equals your video's; down if it clearly differs (a different rate drifts over the film). Unknown (`0`) is neutral. |
+| A **runtime** written in the release text (`… 1:35:08`) | Up if it matches your video's duration; down if it clearly differs |
+| **Release group** | Up if the same |
+| Hearing-impaired, AI-translated | Mildly down |
+| Trusted uploader, rating, download count | Small tie-breakers |
+| Split over several discs (`nb_cd > 1`), machine-translated, foreign-parts-only | **Excluded** |
+
+**4. Download the best, then verify it against your video.** The subtitle's advertising cues are stripped first (they can run past the end of the video), then it **fits** when its last line ends within about 70%–100% of the video's duration (30 seconds of tolerance), its first line is not past a third of the video, and it has a sensible number of lines. This catches a wrong cut, a wrong film and a truncated file. It cannot catch a small frame-rate drift, which is why frame rates are compared *before* downloading.
+
+**5. If it does not fit, the next-best candidate is tried once.** That uses one more download from your quota, and only happens if quota remains. If that one does not fit either, **nothing is saved** and the summary says why:
+
+```
+no en subtitle fit the video (runs to 2:01:41 but the video is only 1:35:08; ends at 0:40:00, only 42% of the video's 1:35:08)
+```
+
+A subtitle that passes is saved, with its advertising cues removed, as `<video name>.srt`.
+
+> [!NOTE]
+> With the API key alone you have 5 downloads a day, so a retry is a real cost: the scoring in step 3 is there so the first download is usually right. Each file uses one download when it works first time, two at most.
+
+**Also handled**
+- **Language already present:** embedded subtitle languages are recognised by their real language code (German `ger` is `de`, Spanish `spa` is `es`, Chinese `chi` is `zh`); previously only the first two letters were compared, which is wrong for those.
+- **Titles that need a choice:** a film or show that has several possible matches lists numbered candidates, and `--pick` resolves it, exactly as for renames.
+- **Polite to the service:** requests are spaced (the limit is about 5 a second), a rate-limit answer is waited out, a refused login is never retried, and the login token is renewed if a long run outlives its 24 hours.
 
 ```bat
 :: See what's missing (offline, no quota spent)
@@ -718,7 +779,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir D:\Tools\Medi
 | `-Yes` | Never ask: use the defaults and the parameters given. |
 | `-FromDir` | Install from a local checkout (developers, offline use). |
 
-- **Re-running it updates.** On an existing install it runs `--update` and never touches `MediaCleanup.toml`.
+- **Re-running it updates.** On an existing install it runs `--update` and never touches `MediaCleanup.toml`. An install older than 1.12.0 has no `--update`, so the installer instead replaces its files from the latest release (verified, with the old script and example config copied to `backup\pre-installer-<time>\`) and keeps your config.
 - **No administrator rights.** Python is installed per user with winget when it is missing.
 - **FileBot is never downloaded.** It is licensed; the installer only tells you where to get it.
 - **Failure leaves nothing half-done outside the install folder**, and the script exits non-zero when run as a file. Under `irm | iex` it never calls `exit`, so your window stays open.
@@ -744,6 +805,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir D:\Tools\Medi
 | 🟠 "nothing here can unpack" a `.7z` | No 7-Zip and no Windows `tar.exe` | `winget install 7zip.7zip`, or use Windows 10 1803 or newer. |
 | 🟠 "uncommitted changes" on `--update` | The folder is a git clone with edits | Commit or stash them; clones are updated with git. |
 | 🟠 A broken install | Files deleted or edited by accident | `python MediaCleanup.py --repair` |
+| 🟠 OpenSubtitles "login failed (HTTP 400 …)" | The `[subtitles] username` is an email address | Use your OpenSubtitles **username**. The run continues with the API key alone (5 downloads per IP per day). |
+| 🟠 `--subtitles` says the quota is used up | The daily limit was reached | The message gives the renewal time (UTC midnight). Log in (username + password) for about 20 a day. |
+| 🟠 "no en subtitle fit the video (…)" | The best two candidates were for a different cut or length | Nothing was saved, on purpose. The reasons show how they differed; try again tomorrow, or fetch one by hand. |
+| 🟠 A film is skipped with "pick one — …" | Several films share the title | `--pick N`, exactly as for renames; subtitles need an identified title. |
 
 ### A file was given a LOCAL name
 
@@ -855,7 +920,7 @@ Either way the id is written into the file's Matroska tags during the tag pass, 
 
 ```
 The Film (2026).tt1111111.mkv          The Film 2026 [tt1111111].mkv
-The Film.2026.tt1111111.1080p.mkv      The Film (2026) - tt1111111ile.mkv
+The Film.2026.tt1111111.1080p.mkv      The Film (2026) - tt1111111file.mkv
 ```
 
 **Renamed as a different, similarly-named show**

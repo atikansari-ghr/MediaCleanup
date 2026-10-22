@@ -87,9 +87,16 @@ fanarttv_api_key = ""
 omdb_api_key     = ""
 
 [subtitles]
-# OpenSubtitles.com credentials for the --subtitles mode (sidecar .srt download).
-# All three are required for downloads: https://www.opensubtitles.com/en/consumers
-# Free accounts: ~20 downloads/day; VIP: 1000/day.
+# OpenSubtitles.com settings for the --subtitles mode (sidecar .srt download).
+#
+# ONLY api_key IS REQUIRED. On its own it can search without limit and download
+# 5 subtitles per IP address per day. Your own consumer key:
+#   https://www.opensubtitles.com/en/consumers          (do not share it)
+#
+# username + password are OPTIONAL. They log you in, which raises the daily download
+# limit (free account ~20, VIP up to 1000). The username is your opensubtitles.com
+# USERNAME - NOT your email address; an email is refused. If the login fails the run
+# carries on with the API key alone and tells you why.
 api_key  = ""
 username = ""
 password = ""

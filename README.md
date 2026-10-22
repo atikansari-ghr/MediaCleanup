@@ -9,7 +9,7 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
-![Version](https://img.shields.io/badge/version-1.12.0-db2777)
+![Version](https://img.shields.io/badge/version-1.12.1-db2777)
 
 [**Quick start**](#-quick-start) · [**How it works**](#-how-it-works) · [**Commands**](#-which-command-do-i-need) · [**Usage guide**](docs/USAGE.md) · [**Configuration**](docs/CONFIGURATION.md) · [**Changelog**](CHANGELOG.md)
 
@@ -255,7 +255,7 @@ Metadata and artwork come from third-party services, used under their respective
 - Artwork may be sourced from **fanart.tv**.
 - Film identification, ratings and certifications may be sourced from **OMDb**.
 - Show identification may use **TVmaze**, through FileBot.
-- Subtitles are downloaded from **OpenSubtitles.com** using your own account.
+- Subtitles are downloaded from **OpenSubtitles.com** using your own API key (and, optionally, your account to raise the daily limit).
 
 MKVToolNix, FileBot, Plex and Jellyfin are trademarks of their respective owners; this project is an independent tool that works alongside them.
 
