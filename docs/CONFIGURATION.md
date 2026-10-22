@@ -30,6 +30,7 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 | 🎞️ [`[filebot]`](#filebot) | Optional FileBot renaming | ⚪ No |
 | 📁 [`[paths]`](#paths) | Movie, TV and output folders | 🔴 Yes |
 | 🏷️ [`[naming]`](#naming) | Prefix stripping, and the LOCAL-name fallback | ⚪ No |
+| 🔄 [`[updates]`](#updates) | The once-a-day "newer release" notice | ⚪ No |
 | 🔤 [`[languages]`](#languages) | Which audio languages are kept; `und` detection | ⚪ No |
 | 🔑 [`[coverart]`](#coverart) | TMDB, fanart.tv and OMDb keys — posters, tags, identification | ⚪ No (strongly recommended) |
 | 💬 [`[subtitles]`](#subtitles) | OpenSubtitles credentials | ⚪ No |
@@ -83,6 +84,19 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 strip_prefixes = ["SomeDistributor", "AnotherName"]
 local_fallback = true
 ```
+
+## `[updates]`
+
+| Key | Required | Description |
+|---|---|---|
+| `check` | No (default `true`) | Once a day, in the background, look for a newer published release and print a one-line notice at the end of a run. The answer is cached in `logs\update_check.json`. Per-run override: `--no-update-check`. `--check-update` always works regardless. See [Versions and updates](USAGE.md#versions-and-updates). |
+
+```toml
+[updates]
+check = true
+```
+
+A **private** repository needs a read-only token in the `MEDIACLEANUP_GITHUB_TOKEN` environment variable (not in this file, so it cannot be committed by accident).
 
 ## `[languages]`
 

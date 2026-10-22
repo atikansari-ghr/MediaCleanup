@@ -53,6 +53,16 @@ Plus standalone maintenance modes, each runnable on its own:
 
 ## 🚀 Quick start
 
+### One command
+
+```powershell
+irm https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.ps1 | iex
+```
+
+The installer finds or installs Python, unpacks the release, verifies every file against the hashes GitHub published for it, fetches MKVToolNix (checksum-verified), writes a first config from your answers and creates a launcher. Prefer to read it first? Download `install.ps1` from the release and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. See [the installer](docs/USAGE.md#the-installer) for every option.
+
+### By hand
+
 ```bat
 :: 1. Get the code
 git clone https://github.com/atikansari-ghr/MediaCleanup.git && cd MediaCleanup
@@ -118,6 +128,14 @@ python MediaCleanup.py --movies --pick 2 3       :: resolve titles 2 and 3, film
 
 The numbers are saved to `logs\pending_identity.csv` and read back, never recomputed, so a number always means the title you were shown.
 
+## 🔄 Install, update and repair
+
+<div align="center">
+<img src="docs/images/lifecycle.svg" alt="Install, check, update, repair and runtime updates, with a matrix of what each command may change" width="100%">
+</div>
+
+The tool looks after itself. `--check-update` compares your version with the latest release (a one-line notice also appears at the end of a run, at most once a day, never delaying it); `--update` installs it with **every file verified against GitHub's published hashes**, a backup of whatever it replaces, and automatic rollback if anything fails; `--repair` restores a damaged install; `--update-runtimes` keeps MKVToolNix, ffmpeg and the pip packages current. Your `MediaCleanup.toml`, `logs\` and ledgers are **never** touched. Details in the [usage guide](docs/USAGE.md#installing-updating-and-repairing).
+
 ## 🧭 Which command do I need?
 
 | I want to… | Run |
@@ -139,6 +157,12 @@ The numbers are saved to `logs\pending_identity.csv` and read back, never recomp
 | Fix mislabelled `und` tracks | `--tv --force-audio-lang 1 Hindi` |
 | Leave unknown titles exactly as they are | `--no-local-name` |
 | Test all my API keys | `--validate-keys` |
+| See my version and tool versions | `--version` |
+| Check for a newer release | `--check-update` |
+| Install the newest release (verified, with rollback) | `--update` |
+| Fix a damaged install | `--repair` |
+| Update MKVToolNix, ffmpeg and the pip packages | `--update-runtimes` |
+| Add an optional tool (ffmpeg, rich, Pillow) | `--install ffmpeg` |
 
 Every mode supports `--dry-run` to preview and `--filter` / `--input` to scope the run.
 
@@ -195,6 +219,7 @@ Runtime tools live inside the project — drop them into the committed skeleton 
 ```
 MediaCleanup\
 ├── MediaCleanup.py              ← the tool
+├── install.ps1                  ← one-command installer (also attached to each release)
 ├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
 ├── MediaCleanup.toml            ← your config + API keys (git-ignored)
 ├── runtimes\                    ← portable tools (binaries git-ignored)

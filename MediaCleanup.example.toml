@@ -53,6 +53,12 @@ strip_prefixes = []
 # --no-local-name) to leave such files exactly as they are.
 local_fallback = true
 
+[updates]
+# Once a day, in the background, look for a newer published release and print a
+# one-line notice at the end of a run. Nothing is downloaded or installed.
+# --check-update always works; --no-update-check skips it for one run.
+check = true
+
 [languages]
 # Audio languages to KEEP — everything else is stripped during remux.
 # The list ORDER = audio track order in the output file.

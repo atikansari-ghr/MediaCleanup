@@ -3,6 +3,24 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`--version`** prints the tool's version and the versions of what it runs on: Python, MKVToolNix, FileBot, `rich`, Pillow, and the optional `ffmpeg` and `x265`. It needs no configuration, so it works on a fresh install. `ffmpeg` and `x265` are reported but nothing calls them yet; a missing one is not an error.
+- **`--check-update`** compares the installed version with the latest *published* GitHub release and prints the changelog entries since. It only reads. Exit code `0` is up to date, `10` a newer release exists, `1` the check could not be made. A private repository needs a read-only token in `MEDIACLEANUP_GITHUB_TOKEN`.
+- **A once-a-day update notice.** Normal runs look for a newer release in the background and print one line at the end if there is one. It never delays a run, the answer is cached in `logs\update_check.json`, a failed check is not retried for an hour, and `--dry-run` stays offline. Off with `--no-update-check` or `[updates] check = false`.
+- The script now carries a `__version__`, kept in step with the newest CHANGELOG entry.
+- **`--update` / `--update-to TAG`** installs a published release. Every file is checked against the git hash GitHub lists for that tag (so it works for every release, with no separate checksum file) and nothing is written unless all of them match. Only files the release itself contains are written — never `MediaCleanup.toml`, `logs\`, `backup\` or the tools in `runtimes\`. Whatever is replaced is copied to `backup\` first and a failure part-way restores it. Files you edited are flagged in the plan; settings new in `MediaCleanup.example.toml` are reported, never applied. A git clone is updated with git (fast-forward, or a deliberate checkout of an older tag). Shows a plan and asks first; `--dry-run` only shows the plan; `--yes` is for unattended use. `--update-to` is the only way to move to an older release.
+- **`--repair`** brings an install back to a working state: restores missing or modified project files from the release you have installed (backed up first), recreates folders, creates `MediaCleanup.toml` from the example if it is missing, reports a config that does not parse (never overwriting it), and re-installs a missing MKVToolNix. `--files-only` limits it to the project files.
+- **`--update-runtimes` and `--install TOOL`** keep the tools current. MKVToolNix is updated from the official portable build, SHA-256 verified; ffmpeg is opt-in (`--install ffmpeg`) and kept updated once installed, on the channel and variant you already have (it carries libx265, so x265 comes with it); `rich` and Pillow are upgraded with pip. FileBot (licensed), a standalone x265 (third-party) and Python (cannot replace the running interpreter) are **reported only**. Downloads come only from `mkvtoolnix.download`, `www.gyan.dev` and `pypi.org`; a replaced tool is kept in `runtimes\_previous\` and put back automatically if the new one does not run.
+- **`install.ps1`**, a one-command installer, also attached to each release: finds or installs Python (winget, per user), unpacks the release, verifies it with `--repair --files-only`, installs MKVToolNix, writes a first `MediaCleanup.toml` from your answers, and creates a launcher. Re-running it on an existing install updates it and never touches your config. It never calls `exit` under `irm | iex`, so it cannot close your window.
+
+### Fixed
+- Two installs or updates of the same tool within one second shared a rollback folder name, which could restore the wrong content. Rollback and backup folder names are now always unique.
+
+### Documentation
+- New diagram `docs/images/lifecycle.svg`: install, check, update, repair and runtime updates, and a matrix of exactly what each command may change. The README gains a one-command install and an "Install, update and repair" section; the usage guide gains `--update`, `--repair`, `--update-runtimes`, `--install` and the installer, with new Troubleshooting rows; `runtimes\README.md` describes `--install` and `--update-runtimes`.
+
 ## [1.11.0] — 2026-10-22
 
 ### Added

@@ -28,6 +28,8 @@
 | Tags, metadata and posters | [Metadata tags](#metadata-tags) · [Cover art](#cover-art) · [Cleaning tags and cover art together](#cleaning-tags-and-cover-art-together) |
 | Know how titles are identified | [Titles no database knows](#titles-no-database-knows) |
 | Fix a wrong or missing name | [Renaming messy filenames](#renaming-messy-filenames) · [Troubleshooting](#troubleshooting) |
+| See my version, or check for a newer one | [Versions and updates](#versions-and-updates) |
+| Install on a new machine, update, repair, or update MKVToolNix | [Installing, updating and repairing](#installing-updating-and-repairing) |
 
 ---
 
@@ -131,6 +133,13 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--validate-keys` | Test each configured API key (TMDB, fanart.tv, OMDb, OpenSubtitles) with one cheap call, print a verdict per source, exit (code 1 if any configured key is invalid). |
 | `--no-fetch-tags` | Disable rich metadata tagging; tag cleaning reverts to basic (title + IMDB id only). |
 | `--self-check` | Validate tool paths, folder access, and API keys; parse a sample MKV; exit. |
+| `--version` | Print this tool's version and the versions of what it runs on (Python, MKVToolNix, FileBot, ffmpeg, x265, `rich`, Pillow), then exit. Needs no config. See [Versions and updates](#versions-and-updates). |
+| `--check-update` | Compare with the latest published release and show what changed. Exit code `0` up to date, `10` newer available, `1` could not check. Downloads nothing. |
+| `--update` / `--update-to TAG` | Install the latest (or a specific) published release, verified file by file, with a backup and automatic rollback. See [Installing, updating and repairing](#installing-updating-and-repairing). |
+| `--repair` | Restore missing or modified project files, recreate folders, report config problems, re-install a missing MKVToolNix. `--files-only` limits it to the project files. |
+| `--update-runtimes` | Update MKVToolNix, ffmpeg (once installed) and the pip packages; report FileBot, x265 and Python. |
+| `--install TOOL` | Install `mkvtoolnix`, `ffmpeg`, `rich` or `pillow`. |
+| `--yes` | Answer yes to the confirmation the update, repair and install modes ask. |
 
 ### Remux options
 
@@ -163,6 +172,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--workers N` | Parallel worker threads (default: CPU count − 1). |
 | `--log-file PATH` | Also write the log to a file (always plain text). |
 | `--no-color` | Disable colored output and summary tables (`NO_COLOR` env also honored). |
+| `--no-update-check` | Skip the once-a-day look for a newer release for this run. Config equivalent: `[updates] check = false`. |
 
 ---
 
@@ -523,6 +533,201 @@ python MediaCleanup.py --cleanmetadata --movies --input "D:\Media\Fixed"
 
 ---
 
+## Versions and updates
+
+```bat
+python MediaCleanup.py --version          :: what is installed
+python MediaCleanup.py --check-update     :: is there a newer release, and what changed
+```
+
+`--version` prints the tool's version and the version of everything it runs on, so a bug report or a "which build do I have?" question has one command to answer it:
+
+```
+MediaCleanup 1.11.0
+  Python       3.13.14   [C:\...\python.exe]
+  Platform     Windows-11-10.0.26100-SP0
+  mkvmerge     mkvmerge v103.0 ('The Darkness') 64-bit   [runtimes\mkvtoolnix\mkvmerge.exe]
+  mkvpropedit  mkvpropedit v103.0 ('The Darkness') 64-bit   [runtimes\mkvtoolnix\mkvpropedit.exe]
+  FileBot      FileBot 5.3.0 (r11096)   [runtimes\FileBot\filebot.exe]
+  ffmpeg       not installed (optional, not used yet)
+  x265         not installed (optional, not used yet)
+  rich         15.0.0
+  Pillow       12.2.0
+```
+
+`ffmpeg` and `x265` are listed because future features will use them; today nothing calls them, and "not installed" is not an error. They are looked for in `runtimes\ffmpeg\bin\` and `runtimes\x265\`, then on the `PATH`.
+
+**Checking for a newer release.** `--check-update` asks GitHub for the latest *published release* — never a branch — and compares it with your version. If a newer one exists it prints the release address and the changelog entries since your version:
+
+```
+A newer release is available: 1.12.0, published 2026-11-01
+  https://github.com/atikansari-ghr/MediaCleanup/releases/tag/v1.12.0
+
+What changed since your version:
+  [1.12.0] - 2026-11-01
+    ### Added
+    - ...
+```
+
+It only reads: nothing is downloaded or installed. The exit code is `0` when you are current, `10` when a newer release exists and `1` when the check could not be made, so it works in a script.
+
+**The daily notice.** Normal runs also look once a day, **in the background**, and print one line at the end if a newer release exists:
+
+```
+MediaCleanup 1.12.0 is available (you have 1.11.0) - run: python MediaCleanup.py --check-update
+```
+
+- It never delays a run: the check runs beside the work, and at the end the tool waits at most a second and a half for it.
+- The answer is cached in `logs\update_check.json` for a day, and a failed check is not retried for an hour, so being offline costs nothing.
+- `--dry-run` stays offline: it only shows a notice an earlier check already found.
+- Turn it off with `--no-update-check` for one run, or `[updates] check = false` in the config.
+
+> [!NOTE]
+> The only thing sent is an ordinary request to `api.github.com` carrying a `MediaCleanup/<version>` user-agent. There is no telemetry.
+
+> [!TIP]
+> If the repository is **private**, GitHub answers "not found" to an anonymous request. Set the environment variable `MEDIACLEANUP_GITHUB_TOKEN` to a read-only personal access token and the check will use it. The token is only ever sent to `api.github.com`, and is dropped if a download is redirected to another host.
+
+### Installing, updating and repairing
+
+<div align="center">
+<img src="images/lifecycle.svg" alt="Install, check, update, repair and runtime updates, with a matrix of what each command may change" width="100%">
+</div>
+
+| Command | What it does |
+|---|---|
+| `install.ps1` | One-command install: Python, the tool, MKVToolNix, a first config, a launcher. See [the installer](#the-installer). |
+| `--update` | Installs the latest published release over this one. |
+| `--update-to vX.Y.Z` | The same, to a specific release — the only way to move to an **older** one. |
+| `--repair` | Brings an install back to a working state. |
+| `--update-runtimes` | Updates MKVToolNix, ffmpeg (once installed) and the pip packages. |
+| `--install TOOL` | Installs `mkvtoolnix`, `ffmpeg`, `rich` or `pillow`. |
+| `--yes` | Answers yes to the confirmation these ask — needed when there is no terminal. |
+
+All of them show a **plan first and ask**, `--dry-run` shows the plan and stops, and a failed step restores what it changed. Exit codes: `0` done (or nothing to do), `1` failed with nothing changed, `5` you declined.
+
+#### `--update`
+
+```bat
+python MediaCleanup.py --update --dry-run     :: show exactly what would change
+python MediaCleanup.py --update               :: ask, then do it
+```
+
+```
+Release v1.12.0, published 2026-11-01
+
+  [1.12.0] - 2026-11-01
+    ### Added
+    - ...
+
+  New files (2):
+    docs/images/lifecycle.svg
+  Replaced (6):
+    MediaCleanup.py
+    ...
+  Already identical: 9 file(s)
+
+  Everything replaced is copied to backup\update-1.11.0-to-1.12.0-20261101-093000 first.
+  MediaCleanup.toml, logs\ and runtimes\ are never touched.
+
+Install v1.12.0? [y/N]
+```
+
+- **Every file is verified.** GitHub publishes a hash for each file in a release. The download is unpacked, each file is checked against its published hash, and nothing is written unless every one matches — so what lands on disk is exactly what was released.
+- **Only files the release contains are written.** `MediaCleanup.toml`, `logs\`, `backup\` and the tools in `runtimes\` are never touched, whatever a release lists.
+- **Anything replaced is backed up first** under `backup\update-<from>-to-<to>-<time>\`, and a failure part-way puts every file back. To undo a finished update, copy the files from that folder back, or run `--update-to` the previous version.
+- **Files you edited are flagged.** If a file differs from the release you have installed, it is listed in the plan and your copy is kept in the backup.
+- **New settings are reported, not applied.** Afterwards the tool lists any setting in `MediaCleanup.example.toml` that your `MediaCleanup.toml` lacks (the defaults apply until you add it). Your config is never edited.
+- **A git clone is updated with git:** it fetches the tags and fast-forwards (or checks out the tag). It refuses if you have uncommitted changes, and an older tag is a deliberate checkout, never a silent no-op.
+
+#### `--repair`
+
+```bat
+python MediaCleanup.py --repair --dry-run
+```
+
+```
+Checking this MediaCleanup 1.11.0 install...
+
+  [ok]   folders
+  [fix]  restore 2 project file(s) from v1.11.0: README.md, docs/USAGE.md
+  [ok]   MediaCleanup.toml reads correctly
+  [--]   setting not in your MediaCleanup.toml (the default applies): updates.check = true
+  [ok]   MKVToolNix runs (mkvmerge v103.0 ('The Darkness') 64-bit)
+  [--]   FileBot not installed (optional)
+```
+
+| Line | Meaning |
+|---|---|
+| `[ok]` | Checked and fine. |
+| `[fix]` | Will be repaired if you confirm. |
+| `[--]` | Information; nothing to do. |
+| `[FAIL]` | Needs you — for example a `MediaCleanup.toml` that is not valid TOML. It is reported, never overwritten. |
+
+It restores missing or modified **project files** from the release you have installed (backed up first), recreates missing folders, creates `MediaCleanup.toml` from the example if it is missing, and re-installs MKVToolNix when it is missing or does not run and lives inside `runtimes\`. A git clone's files are left to git. `--files-only` checks just the project files (the installer uses it to verify a fresh download).
+
+#### `--update-runtimes` and `--install`
+
+```bat
+python MediaCleanup.py --update-runtimes --dry-run
+```
+
+```
+  Component   Installed                  Latest                     Status
+  ----------  -------------------------  -------------------------  ------
+  MKVToolNix  103.0                      103.0                      up to date
+  ffmpeg      2026-01-12-git-21a3e44fbe  2026-10-22-git-bf0e831606  UPDATE: newer git build available (includes libx265)
+  x265        4.1+211-9e551a994          -                          standalone builds are third-party, so it is not updated automatically
+  FileBot     5.3.0                      -                          licensed software - check https://www.filebot.net/ for a newer version
+  Python      3.13.14                    -                          not updated by this tool; use: winget upgrade Python.Python.3.13
+  rich        15.0.0                     15.0.0                     up to date
+  Pillow      12.2.0                     13.0.0                     UPDATE: newer version available (pip)
+```
+
+| Tool | Handling |
+|---|---|
+| **MKVToolNix** | Updated automatically from the official portable build, **SHA-256 verified**. Only a copy inside `runtimes\` is managed; one installed elsewhere is reported. |
+| **ffmpeg** | **Opt-in**: `--install ffmpeg` adds it, then it is kept updated like MKVToolNix. Only gyan.dev builds in `runtimes\ffmpeg\` are managed, on the channel (release or git) and variant (full or essentials) you already have. It carries libx265, so x265 comes with it. Nothing calls it yet. |
+| **`rich`, Pillow** | Upgraded with `pip` when installed; `--install rich` / `--install pillow` add them. |
+| **x265, FileBot, Python** | **Reported only.** x265 binaries are third-party, FileBot is licensed software, and Python cannot replace the interpreter that is running it. |
+
+Downloads come only from `mkvtoolnix.download`, `www.gyan.dev` and `pypi.org`, over HTTPS, and each is checked against a SHA-256 published beside it before it is unpacked. The folder being replaced is moved to `runtimes\_previous\` and **put back automatically if the new tool does not run**; only the newest previous copy is kept. A `.7z` is unpacked with 7-Zip or Windows' built-in `tar`; if neither exists the tool says so.
+
+#### The installer
+
+`install.ps1` gets a machine from nothing to a working install with one command. It is deliberately thin: it finds or installs Python, unpacks the release, writes a first `MediaCleanup.toml`, and then uses the tool's own `--repair --files-only` (to verify every file) and `--install` (for MKVToolNix and the packages).
+
+```powershell
+# from a release (needs a public repository)
+irm https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.ps1 | iex
+
+# or download it, read it, and run it with options
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir D:\Tools\MediaCleanup
+```
+
+| Parameter | Meaning |
+|---|---|
+| `-InstallDir` | Where to install (default `%USERPROFILE%\MediaCleanup`). |
+| `-Tag` | A specific release such as `v1.12.0` (default: the latest). |
+| `-MoviesRoot` `-TvRoot` `-OutputRoot` | Your folders. Asked for when omitted. |
+| `-TmdbKey` `-OmdbKey` `-FanartKey` | Your API keys (all optional). |
+| `-MkvToolNixDir` / `-FileBotExe` | Use an existing MKVToolNix or FileBot instead of installing one. |
+| `-WithFfmpeg` `-WithPillow` `-NoRich` | Optional packages. |
+| `-SkipRuntimes` | Do not install MKVToolNix or any package. |
+| `-AddToPath` | Add the folder to your user PATH so `mediacleanup` works anywhere. |
+| `-Yes` | Never ask: use the defaults and the parameters given. |
+| `-FromDir` | Install from a local checkout (developers, offline use). |
+
+- **Re-running it updates.** On an existing install it runs `--update` and never touches `MediaCleanup.toml`.
+- **No administrator rights.** Python is installed per user with winget when it is missing.
+- **FileBot is never downloaded.** It is licensed; the installer only tells you where to get it.
+- **Failure leaves nothing half-done outside the install folder**, and the script exits non-zero when run as a file. Under `irm | iex` it never calls `exit`, so your window stays open.
+
+> [!WARNING]
+> `irm … | iex` runs a script straight from the internet. If you would rather read it first, download `install.ps1` from the release, open it, and run it with `-File`. It is plain, commented PowerShell.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Jump to |
@@ -533,6 +738,12 @@ python MediaCleanup.py --cleanmetadata --movies --input "D:\Media\Fixed"
 | 🔴 Wrong poster or tags | A different title was matched | [Wrong metadata or poster](#troubleshooting) |
 | 🔴 FileBot errors | Java or `TEMP` path | [FileBot not renaming](#troubleshooting) |
 | ⚪ Files not merged | Different runtime, year or folder | [Files not grouped for merge](#troubleshooting) |
+| 🟠 "GitHub shows no release here" | The repository is private, or no release is published | Set `MEDIACLEANUP_GITHUB_TOKEN` — see [Versions and updates](#versions-and-updates) |
+| 🟠 Update says a file "does not match" | The download was corrupted or altered | Nothing was changed; run `--update` again. If it persists, do not install it. |
+| 🟠 "is it running?" while updating MKVToolNix | A tool from `runtimes\` is open | Close it (and any run in progress) and retry; nothing was changed. |
+| 🟠 "nothing here can unpack" a `.7z` | No 7-Zip and no Windows `tar.exe` | `winget install 7zip.7zip`, or use Windows 10 1803 or newer. |
+| 🟠 "uncommitted changes" on `--update` | The folder is a git clone with edits | Commit or stash them; clones are updated with git. |
+| 🟠 A broken install | Files deleted or edited by accident | `python MediaCleanup.py --repair` |
 
 ### A file was given a LOCAL name
 

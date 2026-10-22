@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 700" width="1320" height="700" role="img">
+<title>Install, update and repair</title>
+<desc>The installer, the version check, the verified update, repair and the runtime updater, and a matrix of exactly what each command may change.</desc>
+<defs><marker id="a64748b" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1.5 1.5L8.5 5L1.5 8.5" fill="none" stroke="#64748b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ae2e8f0" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1.5 1.5L8.5 5L1.5 8.5" fill="none" stroke="#e2e8f0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0.75" y="0.75" width="1318.5" height="698.5" rx="18" fill="#0b1220" stroke="#1e293b" stroke-width="1.5"/>
+<text x="54" y="44" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">Install, update and repair</text>
+<text x="54" y="68" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="14" font-weight="400" fill="#94a3b8" text-anchor="start">Every command shows a plan first, verifies what it downloads, and backs up what it replaces.</text>
+<rect x="54" y="100" width="200" height="84" rx="14" fill="#16a34a" stroke="#86efac" stroke-width="1.5"/>
+<text x="154.0" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Install</text>
+<text x="154.0" y="150.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dcfce7" text-anchor="middle">install.ps1</text>
+<text x="154.0" y="167.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dcfce7" text-anchor="middle">one command</text>
+<rect x="306" y="100" width="200" height="84" rx="14" fill="#2563eb" stroke="#60a5fa" stroke-width="1.5"/>
+<text x="406.0" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Check</text>
+<text x="406.0" y="150.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">--check-update</text>
+<text x="406.0" y="167.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">daily notice</text>
+<rect x="558" y="100" width="200" height="84" rx="14" fill="#7c3aed" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="658.0" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Update</text>
+<text x="658.0" y="150.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">--update</text>
+<text x="658.0" y="167.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">verified, backed up</text>
+<rect x="810" y="100" width="200" height="84" rx="14" fill="#f59e0b" stroke="#fde68a" stroke-width="1.5"/>
+<text x="910.0" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#1f2937" text-anchor="middle">Repair</text>
+<text x="910.0" y="150.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#451a03" text-anchor="middle">--repair</text>
+<text x="910.0" y="167.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#451a03" text-anchor="middle">restores bad files</text>
+<rect x="1062" y="100" width="200" height="84" rx="14" fill="#0d9488" stroke="#5eead4" stroke-width="1.5"/>
+<text x="1162.0" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Runtimes</text>
+<text x="1162.0" y="150.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ccfbf1" text-anchor="middle">--update-runtimes</text>
+<text x="1162.0" y="167.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ccfbf1" text-anchor="middle">MKVToolNix, ffmpeg, pip</text>
+<line x1="256" y1="142.0" x2="303" y2="142.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<line x1="508" y1="142.0" x2="555" y2="142.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<text x="784" y="130.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="400" fill="#94a3b8" text-anchor="middle">any time</text>
+<line x1="760" y1="142.0" x2="807" y2="142.0" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#a64748b)"/>
+<line x1="1012" y1="142.0" x2="1059" y2="142.0" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#a64748b)"/>
+<text x="54" y="238" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="18" font-weight="700" fill="#ffffff" text-anchor="start">What each command may change</text>
+<text x="405.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">Project files</text>
+<text x="555.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">MKVToolNix</text>
+<text x="705.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">ffmpeg</text>
+<text x="855.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">pip packages</text>
+<text x="1005.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">Your config</text>
+<text x="1155.0" y="262" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#cbd5e1" text-anchor="middle">Your media</text>
+<rect x="54" y="280" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="280" width="6" height="40" rx="3" fill="#16a34a"/>
+<text x="76" y="305" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">install.ps1</text>
+<circle cx="405.0" cy="300" r="9" fill="#16a34a" stroke="#86efac" stroke-width="1.5"/>
+<circle cx="555.0" cy="300" r="9" fill="#16a34a" stroke="#86efac" stroke-width="1.5"/>
+<circle cx="705.0" cy="300" r="9" fill="none" stroke="#86efac" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="855.0" cy="300" r="9" fill="none" stroke="#86efac" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="1005.0" cy="300" r="9" fill="none" stroke="#86efac" stroke-width="2" stroke-dasharray="3 3"/>
+<line x1="1147.0" y1="300" x2="1163.0" y2="300" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="328" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="328" width="6" height="40" rx="3" fill="#2563eb"/>
+<text x="76" y="353" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--version  --check-update</text>
+<line x1="397.0" y1="348" x2="413.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="547.0" y1="348" x2="563.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="697.0" y1="348" x2="713.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="847.0" y1="348" x2="863.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="997.0" y1="348" x2="1013.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="1147.0" y1="348" x2="1163.0" y2="348" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="376" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="376" width="6" height="40" rx="3" fill="#7c3aed"/>
+<text x="76" y="401" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--update</text>
+<circle cx="405.0" cy="396" r="9" fill="#7c3aed" stroke="#a78bfa" stroke-width="1.5"/>
+<line x1="547.0" y1="396" x2="563.0" y2="396" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="697.0" y1="396" x2="713.0" y2="396" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="847.0" y1="396" x2="863.0" y2="396" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="997.0" y1="396" x2="1013.0" y2="396" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="1147.0" y1="396" x2="1163.0" y2="396" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="424" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="424" width="6" height="40" rx="3" fill="#f59e0b"/>
+<text x="76" y="449" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--repair</text>
+<circle cx="405.0" cy="444" r="9" fill="#f59e0b" stroke="#fde68a" stroke-width="1.5"/>
+<circle cx="555.0" cy="444" r="9" fill="none" stroke="#fde68a" stroke-width="2" stroke-dasharray="3 3"/>
+<line x1="697.0" y1="444" x2="713.0" y2="444" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="847.0" y1="444" x2="863.0" y2="444" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<circle cx="1005.0" cy="444" r="9" fill="none" stroke="#fde68a" stroke-width="2" stroke-dasharray="3 3"/>
+<line x1="1147.0" y1="444" x2="1163.0" y2="444" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="472" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="472" width="6" height="40" rx="3" fill="#0d9488"/>
+<text x="76" y="497" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--update-runtimes</text>
+<line x1="397.0" y1="492" x2="413.0" y2="492" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<circle cx="555.0" cy="492" r="9" fill="#0d9488" stroke="#5eead4" stroke-width="1.5"/>
+<circle cx="705.0" cy="492" r="9" fill="#0d9488" stroke="#5eead4" stroke-width="1.5"/>
+<circle cx="855.0" cy="492" r="9" fill="#0d9488" stroke="#5eead4" stroke-width="1.5"/>
+<line x1="997.0" y1="492" x2="1013.0" y2="492" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="1147.0" y1="492" x2="1163.0" y2="492" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="520" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="520" width="6" height="40" rx="3" fill="#0891b2"/>
+<text x="76" y="545" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--install TOOL</text>
+<line x1="397.0" y1="540" x2="413.0" y2="540" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<circle cx="555.0" cy="540" r="9" fill="none" stroke="#67e8f9" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="705.0" cy="540" r="9" fill="none" stroke="#67e8f9" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="855.0" cy="540" r="9" fill="none" stroke="#67e8f9" stroke-width="2" stroke-dasharray="3 3"/>
+<line x1="997.0" y1="540" x2="1013.0" y2="540" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="1147.0" y1="540" x2="1163.0" y2="540" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<rect x="54" y="568" width="1212" height="40" rx="10" fill="#111c33"/>
+<rect x="54" y="568" width="6" height="40" rx="3" fill="#4f46e5"/>
+<text x="76" y="593" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">--movies  --tv  ...</text>
+<line x1="397.0" y1="588" x2="413.0" y2="588" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="547.0" y1="588" x2="563.0" y2="588" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="697.0" y1="588" x2="713.0" y2="588" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="847.0" y1="588" x2="863.0" y2="588" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<line x1="997.0" y1="588" x2="1013.0" y2="588" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<circle cx="1155.0" cy="588" r="9" fill="#4f46e5" stroke="#a5b4fc" stroke-width="1.5"/>
+<circle cx="68" cy="630" r="8" fill="#94a3b8" stroke="#e2e8f0" stroke-width="1.5"/>
+<text x="84" y="634.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#cbd5e1" text-anchor="start">changes it</text>
+<circle cx="190" cy="630" r="8" fill="none" stroke="#e2e8f0" stroke-width="2" stroke-dasharray="3 3"/>
+<text x="206" y="634.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#cbd5e1" text-anchor="start">only if missing, or if you ask</text>
+<line x1="446" y1="630" x2="462" y2="630" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
+<text x="472" y="634.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#cbd5e1" text-anchor="start">never</text>
+<text x="560" y="634.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#86efac" text-anchor="start">Your config (MediaCleanup.toml), logs and ledgers are never overwritten by an update.</text>
+</svg>

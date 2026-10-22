@@ -34,10 +34,12 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -45,8 +47,14 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Kept in step with the newest entry in CHANGELOG.md; --version reports it and
+# --check-update compares it with the latest GitHub release.
+__version__ = "1.11.0"
+GITHUB_REPO = "atikansari-ghr/MediaCleanup"
 
 # Optional dependency: 'rich' enables colored log output and end-of-run summary
 # tables. Without it the script runs identically with plain-text output.
@@ -611,6 +619,9 @@ class Config:
     # When no database knows a title, name and tag the file from facts in the file
     # itself — [naming] local_fallback; --no-local-name turns it off.
     LOCAL_NAME_FALLBACK: bool = True
+    # Look for a newer release at most once a day and print a one-line notice —
+    # [updates] check; --no-update-check skips it for one run.
+    UPDATE_CHECK: bool = True
     # Full display names used in the output filename bracket list and track naming.
     LANG_DISPLAY_MAP: Dict[str, str] = dataclasses.field(
         default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[0])
@@ -732,6 +743,11 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
     if not isinstance(local_fallback, bool):
         raise ConfigError("[naming] local_fallback must be true or false")
 
+    updates = data.get("updates", {}) or {}
+    update_check = updates.get("check", True)
+    if not isinstance(update_check, bool):
+        raise ConfigError("[updates] check must be true or false")
+
     def required(section: Dict[str, Any], section_name: str, key: str) -> str:
         v = section.get(key)
         if not v:
@@ -780,6 +796,7 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         LANG_CANONICAL_ORDER=lang_order,
         DETECT_UNDETERMINED_LANGS=detect_und,
         LOCAL_NAME_FALLBACK=local_fallback,
+        UPDATE_CHECK=update_check,
         LANG_DISPLAY_MAP=lang_display,
         LANG_ISO_CODES=lang_iso_codes,
         LANG_NAME_TOKENS=lang_tokens,
@@ -8421,6 +8438,1408 @@ def self_check() -> int:
 
 
 # =========================
+# Version and update check
+# =========================
+# Looks at the latest PUBLISHED GitHub release — never a branch — so what it
+# reports is what was actually released. It only reads: nothing is downloaded or
+# installed here, and a check that fails (offline, rate-limited, private repo) is
+# never an error for the tool. A repository that is private needs a read-only
+# token in the MEDIACLEANUP_GITHUB_TOKEN environment variable.
+
+UPDATE_CACHE_JSON = _SCRIPT_DIR / "logs" / "update_check.json"
+_UPDATE_MAX_AGE_S = 24 * 3600        # a successful check is reused for a day
+_UPDATE_RETRY_S = 3600               # a failed one is not retried for an hour
+_UPDATE_TIMEOUT_S = 5
+_UPDATE_THREAD: Optional[threading.Thread] = None
+_UPDATE_NOTICES: bool = False        # set by main() once the notice is wanted
+
+
+def parse_version(text: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """'v1.11.0' or '1.11.0' -> (1, 11, 0); None when it is not a release version."""
+    m = re.match(r"^\s*v?(\d+)\.(\d+)\.(\d+)", text or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+class _AuthStrippingRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect, but never carry the token to a different host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and (urllib.parse.urlparse(newurl).netloc
+                                != urllib.parse.urlparse(req.full_url).netloc):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_GITHUB_OPENER = urllib.request.build_opener(_AuthStrippingRedirects())
+
+
+def _github_get(path: str, accept: str = "application/vnd.github+json",
+                timeout: float = _UPDATE_TIMEOUT_S,
+                max_bytes: int = 5_000_000) -> Tuple[Optional[int], bytes]:
+    """GET from the GitHub API: (status, body), with status None when it could not be reached."""
+    headers = {"User-Agent": f"MediaCleanup/{__version__}", "Accept": accept,
+               "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.environ.get("MEDIACLEANUP_GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"      # sent to api.github.com only
+    url = f"https://api.github.com{path}"
+    try:
+        with _GITHUB_OPENER.open(urllib.request.Request(url, headers=headers),
+                                 timeout=timeout) as resp:
+            body = resp.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                return 413, b""                           # larger than this call may return
+            return resp.status, body
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+    except Exception as e:
+        logging.debug("GitHub request failed: %s | %s", url, e)
+        return None, b""
+
+
+def fetch_latest_release(timeout: float = _UPDATE_TIMEOUT_S) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The latest published release as {version, tag, url, published}, or (None, why not)."""
+    status, body = _github_get(f"/repos/{GITHUB_REPO}/releases/latest", timeout=timeout)
+    if status is None:
+        return None, "GitHub could not be reached (offline, or blocked)"
+    if status == 404:
+        return None, ("GitHub shows no release here - the repository may be private (set "
+                      "MEDIACLEANUP_GITHUB_TOKEN to a read-only token) or none is published yet")
+    if status in (401, 403):
+        return None, ("GitHub refused the request (rate limit, or the token is invalid) - "
+                      "try again later")
+    if status != 200:
+        return None, f"GitHub answered HTTP {status}"
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None, "GitHub's answer could not be read"
+    ver = parse_version(str(data.get("tag_name") or ""))
+    if not ver:
+        return None, "the latest release has no version tag such as v1.2.3"
+    return {"version": ".".join(str(n) for n in ver), "tag": str(data["tag_name"]),
+            "url": str(data.get("html_url") or ""),
+            "published": str(data.get("published_at") or "")[:10]}, ""
+
+
+def _read_update_cache() -> Dict[str, Any]:
+    try:
+        data = json.loads(UPDATE_CACHE_JSON.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_update_attempt(info: Optional[Dict[str, Any]]) -> None:
+    """Remember that a check was made, and what it found. Never raises."""
+    cache = _read_update_cache()
+    now = time.time()
+    cache["attempted_at"] = now
+    if info:
+        cache.update(info)
+        cache["checked_at"] = now
+    try:
+        UPDATE_CACHE_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UPDATE_CACHE_JSON.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        os.replace(tmp, UPDATE_CACHE_JSON)
+    except OSError as e:
+        logging.debug("Could not write %s: %s", UPDATE_CACHE_JSON.name, e)
+
+
+def _update_refresh_due(now: Optional[float] = None) -> bool:
+    """True when the cached answer is more than a day old and no attempt was made lately."""
+    now = time.time() if now is None else now
+    cache = _read_update_cache()
+
+    def age(key: str) -> float:
+        try:
+            return now - float(cache.get(key, 0))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    return age("checked_at") >= _UPDATE_MAX_AGE_S and age("attempted_at") >= _UPDATE_RETRY_S
+
+
+def update_notice_text() -> Optional[str]:
+    """One line when the cached latest release is newer than this one."""
+    cache = _read_update_cache()
+    latest, current = parse_version(str(cache.get("version") or "")), parse_version(__version__)
+    if latest and current and latest > current:
+        return (f"MediaCleanup {cache['version']} is available (you have {__version__}) - "
+                f"run: python MediaCleanup.py --check-update")
+    return None
+
+
+def start_background_update_check() -> None:
+    """Refresh the cached answer without ever making the run wait for it."""
+    global _UPDATE_THREAD
+    if not _update_refresh_due():
+        return
+
+    def work() -> None:
+        info, problem = fetch_latest_release(_UPDATE_TIMEOUT_S)
+        if not info:
+            logging.debug("Update check failed: %s", problem)
+        _record_update_attempt(info)
+
+    _UPDATE_THREAD = threading.Thread(target=work, name="update-check", daemon=True)
+    _UPDATE_THREAD.start()
+
+
+def finish_update_check() -> None:
+    """At the end of a run: give a check that is still in flight a moment, then print any notice."""
+    t = _UPDATE_THREAD
+    if t is not None and t.is_alive():
+        t.join(1.5)
+    text = update_notice_text()
+    if text:
+        logging.info(text)
+
+
+def parse_changelog_sections(text: str) -> List[Tuple[Tuple[int, int, int], str, str]]:
+    """CHANGELOG.md -> [(version, heading, body)], newest first as written."""
+    heads = list(re.finditer(r"(?m)^## \[(\d+\.\d+\.\d+)\][^\n]*$", text or ""))
+    out: List[Tuple[Tuple[int, int, int], str, str]] = []
+    for i, m in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        out.append((parse_version(m.group(1)) or (0, 0, 0), m.group(0)[3:].strip(),
+                    text[m.end():end].strip()))
+    return out
+
+
+def changelog_between(current: str, tag: str) -> List[Tuple[str, str]]:
+    """The changelog entries after `current`, up to and including release `tag`."""
+    status, body = _github_get(
+        f"/repos/{GITHUB_REPO}/contents/CHANGELOG.md?ref={urllib.parse.quote(tag)}",
+        accept="application/vnd.github.raw+json", timeout=10)
+    if status != 200:
+        return []
+    cur, new = parse_version(current), parse_version(tag)
+    if not cur or not new:
+        return []
+    return [(head, b) for v, head, b in parse_changelog_sections(body.decode("utf-8", errors="replace"))
+            if cur < v <= new]
+
+
+_ASCII_PUNCT = str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'",
+                              "“": '"', "”": '"', "…": "...", " ": " "})
+
+
+def _console_safe(text: str) -> str:
+    """Typographic punctuation printed to a Windows console becomes '?' — use plain ASCII."""
+    return text.translate(_ASCII_PUNCT)
+
+
+def _changelog_highlights(body: str, limit: int = 12) -> List[str]:
+    """The section headings and top-level bullets of one entry, shortened to fit a terminal."""
+    lines: List[str] = []
+    for raw in body.splitlines():
+        if raw.startswith("### ") or raw.startswith("- "):
+            line = _console_safe(raw.replace("**", ""))
+            lines.append(line if len(line) <= 140 else line[:137].rstrip() + "...")
+    more = len(lines) - limit
+    lines = lines[:limit]
+    if more > 0:
+        lines.append(f"... and {more} more - see CHANGELOG.md")
+    return lines
+
+
+def _first_line(text: str) -> str:
+    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+
+
+def _probe_tool(exe: Optional[Path], args: List[str], timeout: int = 30) -> str:
+    """First line of a tool's version output, or why there is none."""
+    if exe is None:
+        return "not configured"
+    if not exe.exists():
+        return f"not found ({exe})"
+    r = run_cmd([str(exe)] + args, timeout_sec=timeout)
+    line = _first_line(r.out) or _first_line(r.err)
+    return f"{line}   [{exe}]" if line else f"installed, version could not be read   [{exe}]"
+
+
+def _find_optional_tool(name: str, root: Optional[Path] = None) -> Optional[Path]:
+    """ffmpeg / x265: the project's own runtimes folder first, then the PATH."""
+    for rel in (f"runtimes/{name}/bin/{name}.exe", f"runtimes/{name}/{name}.exe"):
+        p = (root or _SCRIPT_DIR) / rel
+        if p.exists():
+            return p
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+def _package_version(name: str) -> str:
+    try:
+        from importlib import metadata
+        return metadata.version(name)
+    except Exception:
+        return "not installed (optional)"
+
+
+def print_version() -> int:
+    """--version: this tool's version and what it is running on. Needs no valid config."""
+    cfg: Optional[Config] = None
+    config_problem = ""
+    try:
+        cfg = load_config()
+    except Exception as e:
+        config_problem = str(e)
+
+    rows: List[Tuple[str, str]] = [
+        ("Python", f"{platform.python_version()}   [{sys.executable}]"),
+        ("Platform", platform.platform()),
+    ]
+    if cfg is not None:
+        rows.append(("mkvmerge", _probe_tool(cfg.MKVMERGE_EXE, ["--version"])))
+        rows.append(("mkvpropedit", _probe_tool(cfg.MKVPROPEDIT_EXE, ["--version"])))
+        fb = cfg.FILEBOT_EXE
+        rows.append(("FileBot", _probe_tool(fb, ["-version"], timeout=60) if fb.exists()
+                     else "not installed (optional)"))
+    else:
+        for name in ("mkvmerge", "mkvpropedit", "FileBot"):
+            rows.append((name, f"unknown - configuration not loaded ({config_problem})"))
+    for name, flag in (("ffmpeg", "-version"), ("x265", "--version")):
+        exe = _find_optional_tool(name)
+        rows.append((name, _probe_tool(exe, [flag]) if exe else "not installed (optional, not used yet)"))
+    rows.append(("rich", _package_version("rich")))
+    rows.append(("Pillow", _package_version("pillow")))
+
+    print(f"MediaCleanup {__version__}")
+    width = max(len(k) for k, _ in rows)
+    for k, v in rows:
+        print(f"  {k:<{width}}  {v}")
+    return 0
+
+
+def run_check_update() -> int:
+    """--check-update: compare with the latest release. Exit 0 current, 10 newer available, 1 unknown."""
+    print(f"MediaCleanup {__version__} - checking {GITHUB_REPO} for a newer release...")
+    info, problem = fetch_latest_release(timeout=10)
+    _record_update_attempt(info)
+    if not info:
+        print(f"Could not check for updates: {problem}.")
+        return 1
+    latest, current = parse_version(info["version"]), parse_version(__version__)
+    if current and latest and current >= latest:
+        print(f"You have the latest release ({__version__}).")
+        return 0
+    when = f", published {info['published']}" if info.get("published") else ""
+    print(f"A newer release is available: {info['version']}{when}")
+    if info.get("url"):
+        print(f"  {info['url']}")
+    notes = changelog_between(__version__, info["tag"])
+    if notes:
+        print("\nWhat changed since your version:")
+        for heading, body in notes:
+            print(f"\n  {_console_safe(heading)}")
+            for line in _changelog_highlights(body):
+                print(f"    {line}")
+    return 10
+
+
+# =========================
+# Updating the tool itself (--update)
+# =========================
+# A release is installed only after every file in it has been checked against the
+# git blob hash GitHub lists for that tag, fetched over HTTPS — so what lands on
+# disk is exactly what was published, for every release, with no separate
+# checksum file to maintain. Only files the release itself contains are ever
+# written: MediaCleanup.toml, logs\, backup\ and the runtimes are never touched.
+# Everything replaced is copied to backup\ first, and a failure part-way puts it
+# all back. A git clone is updated with git instead.
+
+_UPDATE_PROTECTED_TOP = frozenset({"logs", "backup", ".git"})
+_UPDATE_PROTECTED_FILES = frozenset({"MediaCleanup.toml"})
+_UPDATE_MAX_ZIP_BYTES = 100_000_000
+# path -> (git blob sha1, mode)
+ReleaseTree = Dict[str, Tuple[str, str]]
+
+
+def _safe_release_path(path: str) -> bool:
+    """A path from a release that is safe to join onto the install folder."""
+    if not path or path.startswith(("/", "\\")) or ":" in path or "\\" in path:
+        return False
+    return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def _is_protected_path(path: str) -> bool:
+    return path in _UPDATE_PROTECTED_FILES or path.split("/", 1)[0] in _UPDATE_PROTECTED_TOP
+
+
+def git_blob_sha1(data: bytes) -> str:
+    """The id git gives a file's content — what GitHub's file list publishes."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _local_blob_shas(path: Path) -> Set[str]:
+    """Hashes a local copy could legitimately have: as-is, and with Windows line endings undone."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return set()
+    return {git_blob_sha1(data), git_blob_sha1(data.replace(b"\r\n", b"\n"))}
+
+
+def fetch_release_tree(tag: str) -> Tuple[Optional[ReleaseTree], str]:
+    """Every file in a release with its published hash, or (None, why not)."""
+    status, body = _github_get(
+        f"/repos/{GITHUB_REPO}/git/trees/{urllib.parse.quote(tag)}?recursive=1", timeout=20)
+    if status is None:
+        return None, "GitHub could not be reached (offline, or blocked)"
+    if status == 404:
+        return None, f"GitHub has no release file list for {tag} (or the repository is private - see MEDIACLEANUP_GITHUB_TOKEN)"
+    if status != 200:
+        return None, f"GitHub answered HTTP {status} for the file list of {tag}"
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None, "GitHub's file list could not be read"
+    if data.get("truncated"):
+        return None, f"the file list of {tag} is too large to verify"
+    tree: ReleaseTree = {}
+    for entry in data.get("tree") or []:
+        mode = str(entry.get("mode") or "")
+        if entry.get("type") != "blob" or mode not in ("100644", "100755"):
+            continue                       # directories, symlinks and submodules are not installed
+        p = str(entry.get("path") or "")
+        if not _safe_release_path(p) or _is_protected_path(p):
+            return None, f"{tag} lists a path this tool will not write: {p!r}"
+        tree[p] = (str(entry.get("sha") or ""), mode)
+    if not tree:
+        return None, f"{tag} lists no files"
+    return tree, ""
+
+
+@dataclasses.dataclass
+class UpdatePlan:
+    add: List[str] = dataclasses.field(default_factory=list)
+    replace: List[str] = dataclasses.field(default_factory=list)
+    remove: List[str] = dataclasses.field(default_factory=list)
+    unchanged: List[str] = dataclasses.field(default_factory=list)
+    edited: List[str] = dataclasses.field(default_factory=list)     # changed locally since the old release
+
+    @property
+    def writes(self) -> List[str]:
+        return self.add + self.replace
+
+    @property
+    def changes(self) -> bool:
+        return bool(self.add or self.replace or self.remove)
+
+
+def build_update_plan(root: Path, old: ReleaseTree, new: ReleaseTree) -> UpdatePlan:
+    """What moving the install folder from the `old` release to `new` would do."""
+    plan = UpdatePlan()
+    for path, (sha, _mode) in sorted(new.items()):
+        local = root / path
+        have = _local_blob_shas(local) if local.is_file() else set()
+        if sha in have:
+            plan.unchanged.append(path)
+            continue
+        if not have:
+            plan.add.append(path)
+            continue
+        plan.replace.append(path)
+        # An edit is a local copy that matches neither release (nothing to compare
+        # with at all when the installed version has no tag).
+        if path not in old or old[path][0] not in have:
+            plan.edited.append(path)
+    for path in sorted(set(old) - set(new)):
+        local = root / path
+        if local.is_file():
+            plan.remove.append(path)
+            if old[path][0] not in _local_blob_shas(local):
+                plan.edited.append(path)
+    return plan
+
+
+def download_release_zip(tag: str) -> Tuple[Optional[bytes], str]:
+    status, body = _github_get(f"/repos/{GITHUB_REPO}/zipball/{urllib.parse.quote(tag)}",
+                               accept="application/vnd.github+json", timeout=120,
+                               max_bytes=_UPDATE_MAX_ZIP_BYTES)
+    if status == 200 and body:
+        return body, ""
+    if status is None:
+        return None, "the download could not be made (offline, or blocked)"
+    return None, f"GitHub answered HTTP {status} for the download of {tag}"
+
+
+def extract_verified(zip_bytes: bytes, tree: ReleaseTree, paths: List[str],
+                     staging: Path) -> Optional[str]:
+    """
+    Unpack `paths` into `staging`, checking each against its published hash.
+    Returns None when every file verified, or a description of the first problem.
+    """
+    import io
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return "the download is not a valid zip file"
+    names = {n for n in zf.namelist() if not n.endswith("/")}
+    top = {n.split("/", 1)[0] for n in names}
+    if len(top) != 1:
+        return "the download has an unexpected layout"
+    prefix = next(iter(top)) + "/"
+    for path in paths:
+        member = prefix + path
+        if member not in names:
+            return f"the download is missing {path}"
+        data = zf.read(member)
+        if git_blob_sha1(data) != tree[path][0]:
+            return f"{path} does not match the file GitHub published for this release"
+        target = staging / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return None
+
+
+def apply_update(root: Path, plan: UpdatePlan, staging: Path, backup_dir: Path) -> None:
+    """
+    Put the staged files in place, backing up whatever they replace. If anything
+    fails, everything already done is undone and the error is re-raised.
+    """
+    done: List[Tuple[str, bool]] = []          # (path, existed before)
+    try:
+        for path in plan.writes:
+            target = root / path
+            existed = target.is_file()
+            if existed:
+                dest = backup_dir / path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, dest)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".updating")
+            try:
+                shutil.copyfile(staging / path, tmp)
+                os.replace(tmp, target)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+            done.append((path, existed))
+        for path in plan.remove:
+            target = root / path
+            dest = backup_dir / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, dest)
+            target.unlink()
+            done.append((path, True))
+    except BaseException:
+        for path, existed in reversed(done):
+            target = root / path
+            try:
+                if existed:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(backup_dir / path, target)
+                else:
+                    target.unlink(missing_ok=True)
+            except OSError as e:
+                logging.error("Could not restore %s (a copy is in %s): %s", path, backup_dir, e)
+        raise
+
+
+def _flatten_toml(data: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for section, body in data.items():
+        if isinstance(body, dict):
+            for key, value in body.items():
+                out[f"{section}.{key}"] = value
+        else:
+            out[section] = body
+    return out
+
+
+def new_config_settings(root: Path) -> List[str]:
+    """Settings the example config now has that the user's own MediaCleanup.toml lacks."""
+    try:
+        example = _flatten_toml(tomllib.loads((root / "MediaCleanup.example.toml").read_text(encoding="utf-8")))
+        mine = _flatten_toml(tomllib.loads((root / "MediaCleanup.toml").read_text(encoding="utf-8")))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    return [f"{k} = {json.dumps(v)}" for k, v in example.items() if k not in mine]
+
+
+def _confirm(question: str, assume_yes: bool) -> bool:
+    """Ask before changing anything. Without a terminal, only --yes can answer."""
+    if assume_yes:
+        return True
+    if not sys.stdin or not sys.stdin.isatty():
+        print(f"{question} - not asking without a terminal; re-run with --yes to proceed.")
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _print_plan(plan: UpdatePlan, backup_dir: Path) -> None:
+    def show(label: str, items: List[str]) -> None:
+        if items:
+            print(f"  {label} ({len(items)}):")
+            for p in items[:12]:
+                print(f"    {p}")
+            if len(items) > 12:
+                print(f"    ... and {len(items) - 12} more")
+
+    show("New files", plan.add)
+    show("Replaced", plan.replace)
+    show("Removed (no longer part of the release)", plan.remove)
+    if plan.unchanged:
+        print(f"  Already identical: {len(plan.unchanged)} file(s)")
+    if plan.edited:
+        print(f"\n  !! You have edited {len(plan.edited)} of these files since your release:")
+        for p in plan.edited[:12]:
+            print(f"     {p}")
+        print("     Your versions are kept in the backup folder, but the release's replace them.")
+    if plan.writes or plan.remove:
+        print(f"\n  Everything replaced is copied to {backup_dir} first.")
+    print("  MediaCleanup.toml, logs\\ and runtimes\\ are never touched.")
+
+
+def _git(root: Path, *args: str, timeout: int = 120) -> CmdResult:
+    return run_cmd(["git", "-C", str(root), *args], timeout_sec=timeout)
+
+
+def _is_git_clone(root: Path) -> bool:
+    return (root / ".git").exists() and shutil.which("git") is not None
+
+
+def _update_via_git(root: Path, tag: str, dry_run: bool, assume_yes: bool) -> int:
+    """Update a git clone with git: fetch the tags, then fast-forward (or check out) the release."""
+    print(f"This folder is a git clone, so it is updated with git (to {tag}).")
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=no")
+    if dirty.out.strip():
+        print("You have uncommitted changes to tracked files - commit or stash them first:")
+        for line in dirty.out.strip().splitlines()[:10]:
+            print(f"    {line}")
+        return 1
+    fetched = _git(root, "fetch", "--tags", "--quiet", "origin")
+    if not fetched.ok:
+        print(f"git fetch failed: {_first_line(fetched.err) or fetched.rc}")
+        return 1
+    if not _git(root, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}").ok:
+        print(f"git does not know the tag {tag} after fetching.")
+        return 1
+    branch = _first_line(_git(root, "symbolic-ref", "-q", "--short", "HEAD").out)
+    head = _first_line(_git(root, "rev-parse", "HEAD").out)
+    target = _first_line(_git(root, "rev-parse", f"{tag}^{{commit}}").out)
+    if head and head == target:
+        print(f"This checkout is already at {tag}.")
+        return 0
+    # A tag your checkout already contains is OLDER: merging it would do nothing and
+    # report success, so moving there has to be an explicit checkout.
+    older = _git(root, "merge-base", "--is-ancestor", tag, "HEAD").ok
+    ahead = _first_line(_git(root, "rev-list", "--count", f"HEAD..{tag}").out) or "?"
+    if older:
+        how = f"check out {tag} (older than your checkout; this leaves {branch or 'HEAD'} behind)"
+    elif branch:
+        how = f"fast-forward {branch} to {tag} ({ahead} new commit(s))"
+    else:
+        how = f"check out {tag} ({ahead} new commit(s))"
+    print(f"  Would {how}.")
+    if dry_run:
+        print("Dry run: nothing changed.")
+        return 0
+    if not _confirm(f"Proceed and {how.split(' (')[0]}?", assume_yes):
+        return 5
+    r = _git(root, "merge", "--ff-only", tag) if (branch and not older) else _git(root, "checkout", tag)
+    if not r.ok:
+        print(f"git could not do that: {_first_line(r.err) or _first_line(r.out)}")
+        if branch and not older:
+            print("  (your local history has diverged from the release - "
+                  f"use git yourself, e.g. git checkout {tag})")
+        return 1
+    print(f"Updated to {tag}.")
+    return 0
+
+
+def install_release_files(root: Path, tag: str, tree: ReleaseTree, plan: UpdatePlan,
+                          backup_dir: Path) -> str:
+    """
+    Download release `tag`, verify every file the plan writes against its published
+    hash, and put them in place (backing up what they replace). Returns "" on
+    success, or what went wrong — in which case nothing has been changed.
+    """
+    print(f"\nDownloading {tag}...")
+    data, problem = download_release_zip(tag)
+    if data is None:
+        return problem
+    with tempfile.TemporaryDirectory(prefix="mediacleanup-update-") as tmp:
+        staging = Path(tmp)
+        bad = extract_verified(data, tree, plan.writes, staging)
+        if bad:
+            return bad
+        print(f"Verified {len(plan.writes)} file(s) against GitHub's published hashes.")
+        try:
+            apply_update(root, plan, staging, backup_dir)
+        except Exception as e:
+            return f"{e} (rolled back)"
+    return ""
+
+
+def run_update(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool = False,
+               to_tag: Optional[str] = None) -> int:
+    """
+    --update / --update-to TAG. Exit codes: 0 updated or already current,
+    1 failed (nothing changed), 5 declined.
+    """
+    print(f"MediaCleanup {__version__} - looking for a release to install...")
+    if to_tag:
+        want = parse_version(to_tag)
+        if not want:
+            print(f"{to_tag!r} is not a release version such as v1.12.0.")
+            return 1
+        info: Dict[str, Any] = {"version": ".".join(map(str, want)),
+                                "tag": "v" + ".".join(map(str, want))}
+    else:
+        found, problem = fetch_latest_release(timeout=10)
+        _record_update_attempt(found)
+        if not found:
+            print(f"Could not look for updates: {problem}.")
+            return 1
+        info = found
+    cur, new = parse_version(__version__), parse_version(info["version"])
+    if cur == new:
+        print(f"You already have {__version__}.")
+        return 0
+    if cur and new and new < cur:
+        if not to_tag:
+            print(f"The latest release ({info['version']}) is older than yours ({__version__}); nothing to do.")
+            return 0
+        print(f"Note: {info['tag']} is OLDER than {__version__} - installing it because you asked for it.")
+    tag = info["tag"]
+    print(f"Release {tag}" + (f", published {info['published']}" if info.get("published") else ""))
+
+    notes = changelog_between(__version__, tag) if (cur and new and new > cur) else []
+    for heading, body in notes:
+        print(f"\n  {_console_safe(heading)}")
+        for line in _changelog_highlights(body, limit=8):
+            print(f"    {line}")
+    print()
+
+    if _is_git_clone(root):
+        return _update_via_git(root, tag, dry_run, assume_yes)
+
+    new_tree, why = fetch_release_tree(tag)
+    if new_tree is None:
+        print(f"Cannot verify {tag}: {why}.")
+        return 1
+    old_tree, why_old = fetch_release_tree("v" + __version__)
+    if old_tree is None:
+        print(f"Note: the installed version's file list is unavailable ({why_old}); every file that "
+              "differs from the release will be treated as edited and backed up.")
+        old_tree = {}
+    plan = build_update_plan(root, old_tree, new_tree)
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = _unique_path(root / "backup" / f"update-{__version__}-to-{info['version']}-{stamp}")
+    _print_plan(plan, backup_dir)
+    if not plan.changes:
+        print(f"\nEvery file already matches {tag}.")
+        return 0
+    if dry_run:
+        print("\nDry run: nothing changed.")
+        return 0
+    if not _confirm(f"\nInstall {tag}?", assume_yes):
+        return 5
+
+    problem = install_release_files(root, tag, new_tree, plan, backup_dir)
+    if problem:
+        print(f"Update failed, nothing was changed: {problem}.")
+        return 1
+
+    try:
+        hist = root / "logs" / "update_history.csv"
+        hist.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not hist.exists()
+        with open(hist, "a", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            if fresh:
+                w.writerow(["when", "from", "to", "files_written", "files_removed", "backup"])
+            w.writerow([_dt.datetime.now().isoformat(timespec="seconds"), __version__, info["version"],
+                        len(plan.writes), len(plan.remove), str(backup_dir)])
+    except OSError:
+        pass
+    print(f"\nUpdated {__version__} -> {info['version']}: {len(plan.writes)} file(s) written, "
+          f"{len(plan.remove)} removed. Previous versions are in {backup_dir}.")
+    fresh_settings = new_config_settings(root)
+    if fresh_settings:
+        print("\nNew settings in MediaCleanup.example.toml that your MediaCleanup.toml does not have "
+              "(the defaults apply until you add them):")
+        for line in fresh_settings:
+            print(f"    {line}")
+    print("\nRun: python MediaCleanup.py --version")
+    return 0
+
+
+# =========================
+# Runtimes: --update-runtimes, --install, --repair
+# =========================
+# The tools this one runs on, each handled the way it deserves:
+#   MKVToolNix   updated automatically (official portable build, checksum verified)
+#   ffmpeg       opt-in; once installed it is kept updated like MKVToolNix. It carries
+#                libx265, so x265 comes with it
+#   rich/Pillow  updated with pip when installed
+#   x265, FileBot, Python   reported only — x265 binaries are third-party, FileBot is
+#                licensed software and Python cannot replace the interpreter running it
+# Only files from the hosts listed below are ever downloaded, each is checked
+# against a SHA-256 published beside it, and the folder being replaced is kept in
+# runtimes\_previous\ and put back if the new one does not run.
+
+_RUNTIME_HOSTS = frozenset({"mkvtoolnix.download", "www.gyan.dev", "pypi.org"})
+_PIP_PACKAGES = {"rich": "rich", "pillow": "Pillow"}        # the only packages pip is ever asked for
+_MKV_LATEST_URL = "https://mkvtoolnix.download/latest-release.json"
+_FFMPEG_BUILDS = "https://www.gyan.dev/ffmpeg/builds/"
+_INSTALLABLE = ("mkvtoolnix", "ffmpeg", "rich", "pillow")
+
+
+def _runtime_url_ok(url: str) -> bool:
+    p = urllib.parse.urlparse(url)
+    return p.scheme == "https" and (p.hostname or "") in _RUNTIME_HOSTS
+
+
+def _fetch_text(url: str, timeout: float = 20, max_bytes: int = 5_000_000) -> Optional[str]:
+    """A small text/JSON document from a trusted host, or None."""
+    if not _runtime_url_ok(url):
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": f"MediaCleanup/{__version__}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not _runtime_url_ok(resp.geturl()):
+                return None                      # redirected somewhere that is not listed
+            data = resp.read(max_bytes + 1)
+        return data.decode("utf-8", errors="replace") if len(data) <= max_bytes else None
+    except Exception as e:
+        logging.debug("Fetch failed: %s | %s", url, e)
+        return None
+
+
+def _download_file(url: str, dest: Path, max_bytes: int, timeout: float = 120) -> Tuple[Optional[str], str]:
+    """Stream a file from a trusted host to disk. Returns (sha256 hex, "") or (None, problem)."""
+    if not _runtime_url_ok(url):
+        return None, f"{url} is not on a download host this tool trusts"
+    digest, got, mark = hashlib.sha256(), 0, 25
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": f"MediaCleanup/{__version__}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as fh:
+            if not _runtime_url_ok(resp.geturl()):
+                return None, "the download was redirected to a host this tool does not trust"
+            total = int(resp.headers.get("Content-Length") or 0)
+            if total > max_bytes:
+                return None, "the download is larger than expected"
+            while True:
+                chunk = resp.read(262144)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > max_bytes:
+                    return None, "the download is larger than expected"
+                digest.update(chunk)
+                fh.write(chunk)
+                while total and got * 100 // total >= mark and mark < 100:
+                    print(f"    {mark}% of {total // 1_000_000} MB", flush=True)
+                    mark += 25
+    except Exception as e:
+        return None, f"the download failed: {e}"
+    return digest.hexdigest(), ""
+
+
+def _parse_sha256(text: str, filename: Optional[str] = None) -> Optional[str]:
+    """A SHA-256 from a '<hash>  <file>' listing, or a file holding only the hash."""
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*([0-9a-fA-F]{64})(?:\s+\*?(.+?))?\s*$", line)
+        if m and (not filename or not m.group(2) or Path(m.group(2)).name == filename):
+            return m.group(1).lower()
+    return None
+
+
+def _numeric_version(text: Optional[str]) -> Tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", text or "")[:4])
+
+
+_TAR_CHECKED: Dict[str, bool] = {}
+_NO_7Z = ("this archive is a .7z and nothing here can unpack it - install 7-Zip "
+          "(winget install 7zip.7zip) or use Windows 10 1803 or newer, which has tar.exe")
+
+
+def find_7z_extractor() -> Optional[Tuple[str, str]]:
+    """('7z', path) or ('bsdtar', path) — either can unpack a .7z — else None."""
+    for name in ("7z", "7za"):
+        found = shutil.which(name)
+        if found:
+            return "7z", found
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        p = Path(base) / "7-Zip" / "7z.exe"
+        if p.exists():
+            return "7z", str(p)
+    tar = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
+    if tar.exists():
+        if str(tar) not in _TAR_CHECKED:
+            _TAR_CHECKED[str(tar)] = "bsdtar" in (run_cmd([str(tar), "--version"], 15).out or "").lower()
+        if _TAR_CHECKED[str(tar)]:
+            return "bsdtar", str(tar)
+    return None
+
+
+def extract_archive(archive: Path, dest: Path) -> str:
+    """Unpack a .zip or .7z into dest. Returns "" on success or what went wrong."""
+    dest.mkdir(parents=True, exist_ok=True)
+    if archive.suffix.lower() == ".zip":
+        root = dest.resolve()
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                for info in zf.infolist():
+                    target = (dest / info.filename).resolve()
+                    if root != target and root not in target.parents:
+                        return f"the archive tries to write outside its folder ({info.filename})"
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(info) as src, open(target, "wb") as out:
+                            shutil.copyfileobj(src, out)
+        except (zipfile.BadZipFile, OSError) as e:
+            return f"the archive could not be unpacked: {e}"
+        return ""
+    ext = find_7z_extractor()
+    if ext is None:
+        return _NO_7Z
+    kind, path = ext
+    cmd = ([path, "x", "-y", f"-o{dest}", str(archive)] if kind == "7z"
+           else [path, "-xf", str(archive), "-C", str(dest)])
+    r = run_cmd(cmd, timeout_sec=900)
+    return "" if r.ok else f"the archive could not be unpacked: {_first_line(r.err) or _first_line(r.out)}"
+
+
+def _find_dir_with(base: Path, marker: str, max_depth: int = 3) -> Optional[Path]:
+    """The shallowest folder under base that contains `marker` (a relative file path)."""
+    level = [base]
+    for _ in range(max_depth + 1):
+        for d in level:
+            if (d / marker).is_file():
+                return d
+        level = [c for d in level if d.is_dir() for c in sorted(d.iterdir()) if c.is_dir()]
+    return None
+
+
+def _unique_path(path: Path) -> Path:
+    """`path`, or `path-2`, `path-3`... when it is taken — two runs in the same second must not share a folder."""
+    candidate, n = path, 1
+    while candidate.exists():
+        n += 1
+        candidate = path.with_name(f"{path.name}-{n}")
+    return candidate
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+# --- what is installed, and what is newest -----------------------------------------
+
+def mkvtoolnix_installed(exe: Path) -> Optional[str]:
+    m = re.search(r"mkvmerge v([\d.]+)", _probe_tool(exe, ["--version"], timeout=30)) if exe.exists() else None
+    return m.group(1) if m else None
+
+
+def mkvtoolnix_latest() -> Optional[str]:
+    text = _fetch_text(_MKV_LATEST_URL)
+    try:
+        v = str(json.loads(text or "")["mkvtoolnix-releases"]["latest-source"]["version"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return v if re.fullmatch(r"\d+(\.\d+)+", v) else None
+
+
+def mkvtoolnix_package(version: str, use_7z: bool) -> Tuple[str, str, str]:
+    """(archive url, checksum url, file name) of the 64-bit portable build."""
+    name = f"mkvtoolnix-64-bit-{version}.{'7z' if use_7z else 'zip'}"
+    base = f"https://mkvtoolnix.download/windows/releases/{version}/"
+    return base + name, base + name + ".sha256", name
+
+
+def parse_ffmpeg_version(line: str) -> Dict[str, Any]:
+    """'ffmpeg version 2026-01-12-git-21a3e44fbe-full_build-www.gyan.dev ...' -> channel, version, variant."""
+    m = re.search(r"ffmpeg version (\S+)", line or "")
+    token = m.group(1) if m else ""
+    out: Dict[str, Any] = {"channel": None, "version": None, "variant": None, "gyan": "gyan.dev" in token}
+    g = re.match(r"(\d{4}-\d{2}-\d{2}-git-[0-9a-f]+)", token)
+    r = re.match(r"(\d+(?:\.\d+)+)", token)
+    if g:
+        out["channel"], out["version"] = "git", g.group(1)
+    elif r:
+        out["channel"], out["version"] = "release", r.group(1)
+    out["variant"] = "full" if "full_build" in token else ("essentials" if "essentials_build" in token else None)
+    return out
+
+
+def ffmpeg_latest(channel: str) -> Optional[str]:
+    text = (_fetch_text(_FFMPEG_BUILDS + ("git-version" if channel == "git" else "release-version")) or "").strip()
+    ok = re.fullmatch(r"\d{4}-\d{2}-\d{2}-git-[0-9a-f]+", text) if channel == "git" else re.fullmatch(r"\d+(\.\d+)+", text)
+    return text if ok else None
+
+
+def ffmpeg_package(channel: str, variant: str) -> Tuple[str, str, str]:
+    ext = "zip" if (channel == "release" and variant == "essentials") else "7z"
+    name = f"ffmpeg-{channel}-{variant}.{ext}"
+    return _FFMPEG_BUILDS + name, _FFMPEG_BUILDS + name + ".sha256", name
+
+
+def ffmpeg_is_newer(info: Dict[str, Any], latest: str) -> bool:
+    if info.get("channel") == "git":
+        return latest[:10] > str(info.get("version") or "")[:10]       # ISO dates sort as text
+    return _numeric_version(latest) > _numeric_version(info.get("version"))
+
+
+def pypi_latest(package: str) -> Optional[str]:
+    try:
+        return str(json.loads(_fetch_text(f"https://pypi.org/pypi/{package}/json", max_bytes=8_000_000) or "")["info"]["version"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _package_installed(name: str) -> Optional[str]:
+    try:
+        from importlib import metadata
+        return metadata.version(name)
+    except Exception:
+        return None
+
+
+@dataclasses.dataclass
+class RuntimeStatus:
+    key: str
+    label: str
+    installed: Optional[str] = None
+    latest: Optional[str] = None
+    action: str = "none"                 # 'update' when this tool can and should be updated
+    note: str = ""
+    extra: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def gather_runtime_status(root: Path, cfg: Optional[Config]) -> List[RuntimeStatus]:
+    """Look at every tool this one runs on. Network lookups that fail leave 'latest' unknown."""
+    runtimes = root / "runtimes"
+    out: List[RuntimeStatus] = []
+
+    # MKVToolNix
+    exe = cfg.MKVMERGE_EXE if cfg else runtimes / "mkvtoolnix" / "mkvmerge.exe"
+    st = RuntimeStatus("mkvtoolnix", "MKVToolNix", latest=mkvtoolnix_latest())
+    st.extra["target"] = exe.parent
+    managed = _inside(exe, runtimes)
+    if not exe.exists():
+        st.note = "not found" + (" - run: --repair" if managed else f" ({exe})")
+    else:
+        st.installed = mkvtoolnix_installed(exe)
+        if st.latest is None:
+            st.note = "could not check for a newer version"
+        elif st.installed and _numeric_version(st.latest) > _numeric_version(st.installed):
+            if managed:
+                st.action, st.note = "update", "newer version available"
+            else:
+                st.note = "newer version available - installed outside runtimes\\, so update it with its own installer"
+        else:
+            st.note = "up to date"
+    out.append(st)
+
+    # ffmpeg (optional)
+    fexe = _find_optional_tool("ffmpeg", root)
+    st = RuntimeStatus("ffmpeg", "ffmpeg")
+    if fexe is None:
+        st.note = "not installed (optional) - add it with: --install ffmpeg"
+    else:
+        line = _first_line(run_cmd([str(fexe), "-version"], 30).out)
+        info = parse_ffmpeg_version(line)
+        st.installed = info["version"] or "version unknown"
+        st.extra.update(info=info, target=runtimes / "ffmpeg")
+        enc = run_cmd([str(fexe), "-hide_banner", "-encoders"], 30).out or ""
+        x265 = " (includes libx265)" if "libx265" in enc else " (no libx265)"
+        if not info["gyan"] or info["channel"] is None or not _inside(fexe, runtimes / "ffmpeg"):
+            st.note = "not a gyan.dev build in runtimes\\ffmpeg, so it is not updated automatically" + x265
+        else:
+            st.latest = ffmpeg_latest(info["channel"])
+            if st.latest is None:
+                st.note = "could not check for a newer version" + x265
+            elif ffmpeg_is_newer(info, st.latest):
+                st.action, st.note = "update", f"newer {info['channel']} build available" + x265
+            else:
+                st.note = "up to date" + x265
+    out.append(st)
+
+    # x265 (standalone) - reported only
+    xexe = _find_optional_tool("x265", root)
+    st = RuntimeStatus("x265", "x265")
+    if xexe is None:
+        st.note = "not installed (optional); the ffmpeg build above carries libx265"
+    else:
+        r = run_cmd([str(xexe), "--version"], 30)
+        m = re.search(r"version ([\w.+-]+)", (r.err or "") + (r.out or ""))
+        st.installed = m.group(1) if m else "version unknown"
+        st.note = "standalone builds are third-party, so it is not updated automatically"
+    out.append(st)
+
+    # FileBot - licensed, reported only
+    fb = cfg.FILEBOT_EXE if cfg else runtimes / "FileBot" / "filebot.exe"
+    st = RuntimeStatus("filebot", "FileBot")
+    if fb.exists():
+        m = re.search(r"FileBot ([\d.]+)", _first_line(run_cmd([str(fb), "-version"], 90).out))
+        st.installed = m.group(1) if m else "version unknown"
+        st.note = "licensed software - check https://www.filebot.net/ for a newer version"
+    else:
+        st.note = "not installed (optional) - https://www.filebot.net/"
+    out.append(st)
+
+    # Python - reported only
+    st = RuntimeStatus("python", "Python", installed=platform.python_version())
+    minor = sys.version_info.minor
+    st.note = ("below the minimum, 3.11 - " if sys.version_info < (3, 11) else "") + \
+              f"not updated by this tool; use: winget upgrade Python.Python.3.{minor}"
+    out.append(st)
+
+    # pip packages
+    for key, pkg in _PIP_PACKAGES.items():
+        st = RuntimeStatus(key, pkg, installed=_package_installed(pkg))
+        if st.installed is None:
+            st.note = f"not installed (optional) - add it with: --install {key}"
+        else:
+            st.latest = pypi_latest(pkg)
+            if st.latest is None:
+                st.note = "could not check for a newer version"
+            elif _numeric_version(st.latest) > _numeric_version(st.installed):
+                st.action, st.note = "update", "newer version available (pip)"
+            else:
+                st.note = "up to date"
+        out.append(st)
+    return out
+
+
+def _print_runtime_table(statuses: List[RuntimeStatus]) -> None:
+    rows = [("Component", "Installed", "Latest", "Status")] + [
+        (s.label, s.installed or "-", s.latest or "-",
+         ("UPDATE: " if s.action == "update" else "") + s.note) for s in statuses]
+    widths = [max(len(r[i]) for r in rows) for i in range(3)]
+    for i, r in enumerate(rows):
+        print("  " + "  ".join(r[j].ljust(widths[j]) for j in range(3)) + "  " + r[3])
+        if i == 0:
+            print("  " + "  ".join("-" * widths[j] for j in range(3)) + "  " + "-" * 6)
+
+
+# --- installing ---------------------------------------------------------------------
+
+def install_archive_runtime(root: Path, key: str, target: Path, package: Tuple[str, str, str],
+                            marker: str, sanity: List[Tuple[str, List[str]]],
+                            max_bytes: int = 300_000_000) -> str:
+    """
+    Download, verify and unpack a portable tool, then swap it into `target`. The
+    folder it replaces is kept in runtimes\\_previous\\ and put back if the new one
+    does not run. Returns "" on success or what went wrong.
+    """
+    url, sha_url, filename = package
+    runtimes = root / "runtimes"
+    staging = runtimes / f"_staging-{key}"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        expected = _parse_sha256(_fetch_text(sha_url) or "", filename)
+        if not expected:
+            return f"the published checksum could not be read ({sha_url})"
+        archive = staging / filename
+        print(f"  Downloading {filename}...", flush=True)
+        got, problem = _download_file(url, archive, max_bytes)
+        if got is None:
+            return problem
+        if got != expected:
+            return f"{filename} does not match the SHA-256 published beside it - discarded"
+        print("  Checksum verified.", flush=True)
+        problem = extract_archive(archive, staging / "x")
+        if problem:
+            return problem
+        archive.unlink(missing_ok=True)
+        content = _find_dir_with(staging / "x", marker)
+        if content is None:
+            return f"the archive does not contain {marker}"
+        previous: Optional[Path] = None
+        if target.exists():
+            keep = runtimes / "_previous"
+            keep.mkdir(parents=True, exist_ok=True)
+            previous = _unique_path(keep / f"{key}-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+            try:
+                shutil.move(str(target), str(previous))
+            except OSError as e:
+                return f"could not move the current {key} aside ({e}) - is it running?"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(content), str(target))
+            for rel, args in sanity:
+                if not run_cmd([str(target / rel), *args], 60).ok:
+                    raise RuntimeError(f"{rel} does not run")
+        except BaseException as e:
+            shutil.rmtree(target, ignore_errors=True)
+            if previous is not None:
+                shutil.move(str(previous), str(target))
+            return f"{e} - the previous version was put back"
+        for old in sorted((runtimes / "_previous").glob(f"{key}-*"))[:-1]:
+            shutil.rmtree(old, ignore_errors=True)         # keep only the newest rollback copy
+        return ""
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def install_mkvtoolnix(root: Path, version: str, target: Path) -> str:
+    # The .7z is a third the size of the .zip, so it is used whenever it can be unpacked.
+    pkg = mkvtoolnix_package(version, use_7z=find_7z_extractor() is not None)
+    return install_archive_runtime(root, "mkvtoolnix", target, pkg, "mkvmerge.exe",
+                                   [("mkvmerge.exe", ["--version"]), ("mkvpropedit.exe", ["--version"])])
+
+
+def install_ffmpeg(root: Path, channel: str = "release", variant: str = "full") -> str:
+    pkg = ffmpeg_package(channel, variant)
+    if pkg[2].endswith(".7z") and find_7z_extractor() is None:
+        return _NO_7Z
+    return install_archive_runtime(root, "ffmpeg", root / "runtimes" / "ffmpeg", pkg, "bin/ffmpeg.exe",
+                                   [("bin/ffmpeg.exe", ["-version"])])
+
+
+def pip_install(package_key: str, upgrade: bool) -> str:
+    pkg = _PIP_PACKAGES.get(package_key)
+    if pkg is None:
+        return f"{package_key} is not a package this tool manages"
+    cmd = [sys.executable, "-m", "pip", "install"] + (["--upgrade"] if upgrade else []) + [pkg]
+    r = run_cmd(cmd, timeout_sec=600)
+    return "" if r.ok else (_first_line(r.err) or _first_line(r.out) or f"pip exited {r.rc}")
+
+
+def apply_runtime_update(root: Path, st: RuntimeStatus) -> str:
+    if st.key == "mkvtoolnix":
+        return install_mkvtoolnix(root, st.latest or "", st.extra["target"])
+    if st.key == "ffmpeg":
+        info = st.extra["info"]
+        return install_ffmpeg(root, info["channel"], info["variant"] or "full")
+    if st.key in _PIP_PACKAGES:
+        return pip_install(st.key, upgrade=True)
+    return f"{st.label} is not updated by this tool"
+
+
+def _load_config_quietly(root: Path) -> Optional[Config]:
+    try:
+        return load_config(root / "MediaCleanup.toml")
+    except Exception:
+        return None
+
+
+def run_update_runtimes(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool = False) -> int:
+    """--update-runtimes. Exit 0 when nothing failed, 1 when an update failed, 5 when declined."""
+    print("Checking the tools MediaCleanup runs on...\n")
+    statuses = gather_runtime_status(root, _load_config_quietly(root))
+    _print_runtime_table(statuses)
+    todo = [s for s in statuses if s.action == "update"]
+    if not todo:
+        print("\nNothing to update.")
+        return 0
+    names = ", ".join(s.label for s in todo)
+    print(f"\nWould update: {names}.")
+    print("  Each download is checked against a checksum published beside it; a replaced tool is "
+          "kept in runtimes\\_previous\\ and put back if the new one does not run.")
+    if dry_run:
+        print("Dry run: nothing changed.")
+        return 0
+    if not _confirm(f"\nUpdate {names}?", assume_yes):
+        return 5
+    failed = 0
+    for s in todo:
+        print(f"\n{s.label}: {s.installed} -> {s.latest}")
+        problem = apply_runtime_update(root, s)
+        if problem:
+            failed += 1
+            print(f"  FAILED: {problem}")
+        else:
+            print(f"  Updated {s.label}.")
+    print(f"\n{len(todo) - failed} updated, {failed} failed.")
+    return 1 if failed else 0
+
+
+def run_install(tool: str, root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool = False) -> int:
+    """--install TOOL: add an optional tool (or a missing required one), then keep it updated."""
+    if tool not in _INSTALLABLE:
+        print(f"{tool!r} cannot be installed by this tool. It can install: {', '.join(_INSTALLABLE)}.")
+        print("  FileBot is licensed and x265 is third-party (an ffmpeg build already carries libx265); "
+              "Python is installed with winget or from python.org.")
+        return 1
+    cfg = _load_config_quietly(root)
+    st = next(s for s in gather_runtime_status(root, cfg) if s.key == tool)
+    if st.installed:
+        print(f"{st.label} {st.installed} is already installed. Use --update-runtimes to keep it current.")
+        return 0
+    if tool in _PIP_PACKAGES:
+        print(f"Would install the {_PIP_PACKAGES[tool]} Python package with pip.")
+    else:
+        latest = mkvtoolnix_latest() if tool == "mkvtoolnix" else ffmpeg_latest("release")
+        if not latest:
+            print(f"Could not find the latest {st.label} version (offline, or the site is unreachable).")
+            return 1
+        print(f"Would install {st.label} {latest} into runtimes\\{tool}\\ (checksum verified).")
+    if dry_run:
+        print("Dry run: nothing changed.")
+        return 0
+    if not _confirm(f"\nInstall {st.label}?", assume_yes):
+        return 5
+    if tool in _PIP_PACKAGES:
+        problem = pip_install(tool, upgrade=False)
+    elif tool == "mkvtoolnix":
+        problem = install_mkvtoolnix(root, latest, st.extra["target"])
+    else:
+        problem = install_ffmpeg(root, "release", "full")
+    if problem:
+        print(f"FAILED: {problem}")
+        return 1
+    print(f"Installed {st.label}.")
+    return 0
+
+
+# --- repair -------------------------------------------------------------------------
+
+def run_repair(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool = False,
+               files_only: bool = False) -> int:
+    """
+    --repair: bring an install back to a working state without touching the user's
+    choices: restore missing or modified project files, recreate folders, report
+    config problems, and re-install a missing MKVToolNix. Exit 0 when everything is
+    fine or was fixed, 1 when something could not be fixed, 5 when declined.
+
+    files_only checks and restores just the project files — what the installer uses to
+    verify a fresh download without also creating a config or fetching tools.
+    """
+    print(f"Checking this MediaCleanup {__version__} install...\n")
+    fixes: List[Tuple[str, Any]] = []          # (description, callable returning a problem or "")
+    unfixable = 0
+
+    def ok(msg: str) -> None:
+        print(f"  [ok]   {msg}")
+
+    def todo(msg: str, action) -> None:
+        print(f"  [fix]  {msg}")
+        fixes.append((msg, action))
+
+    def bad(msg: str) -> None:
+        nonlocal unfixable
+        unfixable += 1
+        print(f"  [FAIL] {msg}")
+
+    def note(msg: str) -> None:
+        print(f"  [--]   {msg}")
+
+    # folders
+    missing_dirs = [d for d in ("logs", "runtimes") if not (root / d).is_dir()] if not files_only else []
+
+    def make_dirs() -> str:
+        for d in missing_dirs:
+            (root / d).mkdir(parents=True, exist_ok=True)
+        return ""
+
+    if missing_dirs:
+        todo(f"create the missing folder(s): {', '.join(missing_dirs)}", make_dirs)
+    elif not files_only:
+        ok("folders")
+
+    # project files
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if _is_git_clone(root):
+        note("this is a git clone - project files are managed by git (git status / git restore)")
+    elif parse_version(__version__) is None:
+        note("the version is unknown, so the project files cannot be checked")
+    else:
+        tag = "v" + __version__
+        tree, why = fetch_release_tree(tag)
+        if tree is None:
+            note(f"project files not checked: {why}")
+        else:
+            plan = build_update_plan(root, tree, tree)
+            broken = plan.add + plan.replace
+            if not broken:
+                ok(f"project files match release {tag} ({len(plan.unchanged)} checked)")
+            else:
+                shown = ", ".join(broken[:4]) + (f" and {len(broken) - 4} more" if len(broken) > 4 else "")
+                todo(f"restore {len(broken)} project file(s) from {tag}: {shown}",
+                     lambda: install_release_files(root, tag, tree, plan, _unique_path(
+                         root / "backup" / f"repair-{__version__}-{stamp}")))
+
+    def check_environment() -> None:
+        # configuration
+        cfg_path = root / "MediaCleanup.toml"
+        example = root / "MediaCleanup.example.toml"
+        cfg: Optional[Config] = None
+
+        def copy_example() -> str:
+            shutil.copyfile(example, cfg_path)
+            return ""
+
+        if not cfg_path.exists():
+            if example.exists():
+                todo("create MediaCleanup.toml from the example (you still need to set your paths)", copy_example)
+            else:
+                bad("MediaCleanup.toml is missing and so is MediaCleanup.example.toml")
+        else:
+            try:
+                cfg = load_config(cfg_path)
+                ok("MediaCleanup.toml reads correctly")
+            except Exception as e:
+                bad(f"MediaCleanup.toml has a problem you need to fix yourself: {e}")
+            for line in new_config_settings(root):
+                note(f"setting not in your MediaCleanup.toml (the default applies): {line}")
+
+        # MKVToolNix
+        exe = cfg.MKVMERGE_EXE if cfg else root / "runtimes" / "mkvtoolnix" / "mkvmerge.exe"
+        runs = exe.exists() and run_cmd([str(exe), "--version"], 30).ok
+        if runs:
+            ok(f"MKVToolNix runs ({_first_line(run_cmd([str(exe), '--version'], 30).out)})")
+        elif _inside(exe, root / "runtimes"):
+            latest = mkvtoolnix_latest()
+            if latest:
+                todo(f"install MKVToolNix {latest} into {exe.parent}",
+                     lambda: install_mkvtoolnix(root, latest, exe.parent))
+            else:
+                bad("MKVToolNix is missing and its latest version could not be looked up (offline?)")
+        else:
+            bad(f"MKVToolNix is missing or does not run ({exe}); it is outside runtimes\\, so fix that install yourself")
+
+        # optional tools are reported, never repaired
+        fb = cfg.FILEBOT_EXE if cfg else root / "runtimes" / "FileBot" / "filebot.exe"
+        note("FileBot " + ("found" if fb.exists() else "not installed (optional)"))
+        note("ffmpeg " + ("found" if _find_optional_tool("ffmpeg", root) else "not installed (optional, add with --install ffmpeg)"))
+
+    if not files_only:
+        check_environment()
+
+    if not fixes:
+        print("\n" + ("Nothing to repair." if not unfixable else f"\n{unfixable} problem(s) need your attention."))
+        return 1 if unfixable else 0
+    if dry_run:
+        print(f"\nDry run: would make {len(fixes)} fix(es); nothing changed.")
+        return 1 if unfixable else 0
+    if not _confirm(f"\nMake {len(fixes)} fix(es)?", assume_yes):
+        return 5
+    failed = 0
+    for desc, action in fixes:
+        print(f"\n{desc}")
+        problem = action()
+        if problem:
+            failed += 1
+            print(f"  FAILED: {problem}")
+        else:
+            print("  Done.")
+    print(f"\n{len(fixes) - failed} fixed, {failed + unfixable} still need attention. "
+          "Run: python MediaCleanup.py --self-check")
+    return 1 if (failed or unfixable) else 0
+
+
+# =========================
 # Main
 # =========================
 
@@ -8449,6 +9868,16 @@ def report_pending_identity() -> int:
 
 
 def main() -> int:
+    rc = _main()
+    if _UPDATE_NOTICES:
+        try:
+            finish_update_check()
+        except Exception as e:        # a notice must never change how a run ends
+            logging.debug("Update notice failed: %s", e)
+    return rc
+
+
+def _main() -> int:
     ap = argparse.ArgumentParser(description="MediaCleanup.py (Enhanced) - MKV cleanup/merge tool (Movies + TV) using MKVToolNix")
     ap.add_argument("--dry-run", action="store_true", help="Log actions without copying/remuxing.")
     ap.add_argument("--verbose", action="store_true", help="Enable verbose debug logging.")
@@ -8548,6 +9977,46 @@ def main() -> int:
                     help="Do not try to identify tracks tagged 'und'. By default a lone unlabelled "
                          "audio track takes the title's original language and unlabelled text "
                          "subtitles are identified from their own text.")
+    ap.add_argument("--version", action="store_true",
+                    help="Standalone: print this tool's version and the versions of the tools it "
+                         "runs on (Python, MKVToolNix, FileBot, ffmpeg, x265, rich, Pillow), then exit.")
+    ap.add_argument("--check-update", action="store_true",
+                    help="Standalone: compare this version with the latest published GitHub release "
+                         "and show what changed. Exit code 0 = up to date, 10 = a newer release is "
+                         "available, 1 = could not check. Downloads and installs nothing.")
+    ap.add_argument("--update", action="store_true",
+                    help="Standalone: install the latest published release. Every file is verified "
+                         "against GitHub's published hashes, only files the release contains are "
+                         "written (never MediaCleanup.toml, logs\\ or runtimes\\), whatever is "
+                         "replaced is backed up first, and a failure restores it. A git clone is "
+                         "updated with git. Shows a plan and asks first; --dry-run only shows the plan.")
+    ap.add_argument("--update-to", metavar="TAG", default=None,
+                    help="Like --update, but to a specific release, e.g. --update-to v1.11.0. The "
+                         "only way to move to an OLDER release.")
+    ap.add_argument("--update-runtimes", action="store_true",
+                    help="Standalone: update the tools MediaCleanup runs on. MKVToolNix, ffmpeg (once "
+                         "installed) and the pip packages (rich, Pillow) are updated automatically — "
+                         "downloads are checksum-verified and a replaced tool is kept in "
+                         "runtimes\\_previous\\. FileBot, x265 and Python are only reported. Shows a "
+                         "plan and asks first; --dry-run only shows the plan.")
+    ap.add_argument("--install", metavar="TOOL", default=None,
+                    help="Standalone: install an optional tool (ffmpeg, rich, pillow) or a missing "
+                         "required one (mkvtoolnix), then keep it updated with --update-runtimes. "
+                         "FileBot, x265 and Python are explained rather than installed.")
+    ap.add_argument("--repair", action="store_true",
+                    help="Standalone: bring an install back to a working state — restore missing or "
+                         "modified project files (checked against the release), recreate folders, "
+                         "report config problems and re-install a missing MKVToolNix. MediaCleanup.toml, "
+                         "logs\\ and your ledgers are never touched.")
+    ap.add_argument("--files-only", action="store_true",
+                    help="With --repair: check and restore only the project files, not the folders, "
+                         "config or tools. The installer uses it to verify a fresh download.")
+    ap.add_argument("--yes", action="store_true",
+                    help="Answer yes to the confirmation that --update and the other install/repair "
+                         "modes ask — needed when there is no terminal.")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="Skip the once-a-day look for a newer release for this run. Config "
+                         "equivalent: [updates] check = false.")
     ap.add_argument("--no-local-name", action="store_true",
                     help="Leave a title that no database knows exactly as it is. By default such a "
                          "file is named and its tags cleaned from facts in the file itself (title "
@@ -8581,6 +10050,31 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # These two need no configuration, so a fresh install can run them before one exists.
+    maintenance = [
+        (args.version, lambda: print_version()),
+        (args.check_update, lambda: run_check_update()),
+        (args.repair, lambda: run_repair(dry_run=args.dry_run, assume_yes=args.yes, files_only=args.files_only)),
+        (args.update or args.update_to,
+         lambda: run_update(dry_run=args.dry_run, assume_yes=args.yes, to_tag=args.update_to)),
+        (args.update_runtimes, lambda: run_update_runtimes(dry_run=args.dry_run, assume_yes=args.yes)),
+        (args.install, lambda: run_install(args.install, dry_run=args.dry_run, assume_yes=args.yes)),
+    ]
+    if any(flag for flag, _ in maintenance):
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(errors="replace")
+            except (AttributeError, ValueError, OSError):
+                pass
+        rc, first = 0, True
+        for flag, run_it in maintenance:
+            if flag:
+                if not first:
+                    print()
+                first = False
+                rc = run_it()
+        return rc
+
     log_file = Path(args.log_file) if args.log_file else None
 
     # Colored output + summary tables when 'rich' is installed and color isn't
@@ -8600,6 +10094,15 @@ def main() -> int:
         logging.error("%s", e)
         return 2
     logging.debug("Config loaded from %s", CONFIG_FILE)
+
+    # Once a day, in the background, look for a newer release; a one-line notice is
+    # printed at the end of the run. A dry run stays offline, so it only shows what an
+    # earlier check already found.
+    global _UPDATE_NOTICES
+    if CFG.UPDATE_CHECK and not args.no_update_check and not (args.validate_keys or args.self_check):
+        _UPDATE_NOTICES = True
+        if not args.dry_run:
+            start_background_update_check()
 
     # --pick turns numbers from the last run's list into identified films.
     if args.pick:
