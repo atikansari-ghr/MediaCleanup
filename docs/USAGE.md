@@ -1,6 +1,33 @@
-# MediaCleanup — Usage Guide
+<div align="center">
 
-Full reference for running `MediaCleanup.py`. For configuration file details see [CONFIGURATION.md](CONFIGURATION.md).
+# 📖 MediaCleanup — Usage Guide
+
+**Every flag, every workflow, and how a title gets its name.**
+
+[⚙️ Configuration](CONFIGURATION.md) · [🏠 README](../README.md) · [📝 Changelog](../CHANGELOG.md)
+
+</div>
+
+<br>
+
+> [!NOTE]
+> Looking for the one-page overview? The [README](../README.md) has the pipeline diagram, a "which command do I need?" table and the quick start. This guide is the full reference.
+
+## 🗺️ Where to look
+
+| I want to… | Go to |
+|---|---|
+| Install and run it for the first time | [Setup](#setup) |
+| See every command at a glance | [Quick reference](#quick-reference) |
+| Understand what the pipeline does to a file | [How a run works](#how-a-run-works) |
+| Understand the summary table | [Reading the results](#reading-the-results) |
+| Know every flag | [All flags](#all-flags) |
+| Preview before changing anything | [Previewing a run](#previewing-a-run) |
+| Control which languages are kept | [Target languages](#target-languages) · [Releases with no language tags](#releases-with-no-language-tags) |
+| Turn MP4 files into finished MKVs | [Converting MP4 to MKV](#converting-mp4-to-mkv) |
+| Tags, metadata and posters | [Metadata tags](#metadata-tags) · [Cover art](#cover-art) · [Cleaning tags and cover art together](#cleaning-tags-and-cover-art-together) |
+| Know how titles are identified | [Titles no database knows](#titles-no-database-knows) |
+| Fix a wrong or missing name | [Renaming messy filenames](#renaming-messy-filenames) · [Troubleshooting](#troubleshooting) |
 
 ---
 
@@ -12,7 +39,42 @@ Full reference for running `MediaCleanup.py`. For configuration file details see
 
 All folder locations (media roots, tool paths) live in `MediaCleanup.toml` — the script has no hardcoded paths.
 
-**Recommended:** `pip install rich` — enables colored log levels and end-of-run summary tables (`File | Action | Status | Detail` with green OK / yellow SKIP / red FAIL). Without it the script runs identically with plain-text output.
+> [!TIP]
+> `pip install rich` is recommended: it enables coloured log levels and the end-of-run summary table (`File | Action | Status | Detail`). Without it the script runs identically with plain-text output.
+
+---
+
+## How a run works
+
+<div align="center">
+<img src="images/pipeline.svg" alt="MediaCleanup pipeline: scan, group, select tracks, remux, clean tags, identify and rename, cover art" width="100%">
+</div>
+
+| Stage | What happens | Skipped when |
+|---|---|---|
+| 🔵 **1 · Scan & filter** | Finds every `.mkv` under the roots (or `--input`), narrowed by `--filter`. | — |
+| 🔵 **2 · Group variants** | Releases of the same film in one folder are grouped by inferred title + year and matching runtime. | A file has no variants. |
+| 🟣 **3 · Select tracks** | Best video (HEVC preferred); every audio track in your target languages from all variants; matching subtitles. | — |
+| 🟣 **4 · Remux** | mkvmerge writes one clean MKV to a `.tmp` file, then renames it into place. Sources are only read. | The file already has exactly the tracks it needs. |
+| 🟢 **5 · Clean tags** | Strips ads, junk tags and attachments; writes a clean title and track names; embeds rich metadata by verified id. | `--skip-cleantags` |
+| 🟢 **6 · Identify & rename** | Identifies the title through the source chain, then renames by id — or names it from the file if no database knows it. | The title is ambiguous (left as it is). |
+| 🩷 **7 · Cover art** | Embeds the poster of the verified title. | `--skip-coverart`, or the title is unidentified. |
+
+The dashed arrow in the diagram is the **fast path**: a file that is already clean skips stages 3 and 4 and goes straight to tag cleaning and renaming. The coverage chart underneath shows which stages each standalone mode runs.
+
+---
+
+## Reading the results
+
+Every run ends with a summary table. The **Status** column tells you what happened to each file:
+
+| Status | Meaning | What to do |
+|---|---|---|
+| 🟢 **OK** | Processed, and renamed from a verified database match. | Nothing. |
+| 🔵 **LOCAL** | No database knows the title, so it was named and tag-cleaned **from the file alone**. No id, poster or description was added. Listed in `logs\local_named.csv`. | Review the name if you like; a later run renames it properly once a database learns the title. `--no-local-name` disables this. |
+| 🟡 **PARTIAL** | Processed, but **not renamed**: several titles share the name, or the rename failed. The reason is in the Detail column. | For several matches, [`--pick`](#choosing-between-ambiguous-titles). Otherwise read the reason. |
+| ⚪ **SKIP** | Nothing needed doing: already covered, already named, or a film too ambiguous to give a poster. | Nothing. |
+| 🔴 **FAIL** | Something went wrong. Sources are untouched. | Read the reason; see [Troubleshooting](#troubleshooting). |
 
 ---
 
@@ -173,7 +235,8 @@ Some.Film.2026.1080p.WEBRip.x264-GRP.mp4  +  Some.Film.2026.1080p.WEBRip.x264-GR
       -> Some Film (2026) - tt1234567 - WEBRip.1080p.x264 - [English].mkv
 ```
 
-**Your source files are never touched.** The `.mp4` and `.srt` stay exactly where they were, whatever else happens — `--inplace` does not apply here. A ledger (`logs\mp4tomkv_done.csv`) records what has been converted so re-runs skip it; `--overwrite` ignores the ledger and redoes the work.
+> [!IMPORTANT]
+> **Your source files are never touched.** The `.mp4` and `.srt` stay exactly where they were, whatever else happens — `--inplace` does not apply here. A ledger (`logs\mp4tomkv_done.csv`) records what has been converted so re-runs skip it; `--overwrite` ignores the ledger and redoes the work.
 
 **Sidecar subtitles.** Any `.srt` whose name matches the video's (`<stem>.srt`, `<stem>.<tag>.srt`) is muxed in. Three things happen to it first:
 
@@ -185,7 +248,8 @@ Some.Film.2026.1080p.WEBRip.x264-GRP.mp4  +  Some.Film.2026.1080p.WEBRip.x264-GR
 
 **Chapters are kept** — they are real navigation data — but any chapter *name* that advertises is rewritten to a plain `Chapter NN`.
 
-This is the one place the tool edits stream content rather than metadata alone, a deliberate exception to the safety model in [Safety](#safety-model) made so that advertising cannot be welded permanently into your library.
+> [!WARNING]
+> This is the one place the tool edits stream content rather than metadata alone — a deliberate exception to the safety model, made so that advertising cannot be welded permanently into your library.
 
 ## Cleaning tags and cover art together
 
@@ -213,7 +277,7 @@ Cover art is embedded **automatically at the end of every pipeline run** (after 
 **Source chain** (first hit wins):
 
 1. **Local file** — `poster.jpg`/`cover.jpg`/`folder.jpg` (also `.jpeg`/`.png`) next to the MKV. For TV, the season folder and the show folder above it are both checked. A local poster applies to *every* MKV in that folder.
-2. **TMDB** — looked up by IMDB ID from the filename/folder/MKV tags, falling back to a title+year search.
+2. **TMDB** — looked up by the film's verified IMDB id (from the filename, folder or MKV tags, or resolved by the identification chain). Never by a title search.
 3. **fanart.tv** — by IMDB/TMDB ID.
 4. **OMDb** — last resort (~300px image).
 
@@ -283,7 +347,8 @@ python MediaCleanup.py --cleantags --input "D:\Media\Fixed"
 python MediaCleanup.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
 ```
 
-> Note: Plex/Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC/MPC-HC/Kodi and archival self-containment — the file carries its metadata forever, independent of any server.
+> [!NOTE]
+> Plex and Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC, MPC-HC and Kodi, and in archival self-containment — the file carries its metadata forever, independent of any server.
 
 ---
 
@@ -291,17 +356,34 @@ python MediaCleanup.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
 
 A rename starts by **identifying** the title. The sources are tried in order, and a source is passed over only when it found **nothing**:
 
-| | 1st | 2nd | 3rd |
+<div align="center">
+<img src="images/identify.svg" alt="Identification chain: films try TMDB then OMDb, shows try TheTVDB and TMDB then TVmaze; a verified match renames by id, otherwise the file is named from itself" width="100%">
+</div>
+
+| | 🔵 1st | 🟣 2nd | 🟠 3rd |
 |---|---|---|---|
-| **Films** | TMDB | OMDb (needs `omdb_api_key`) | — |
-| **Shows** | TheTVDB and TMDB | TVmaze (no key) | — |
+| **Films** | TMDB | OMDb (needs `omdb_api_key`) | Named from the file |
+| **Shows** | TheTVDB and TMDB | TVmaze (no key) | Named from the file |
 
 Four rules hold throughout:
 
-1. **Several matches stop the chain.** If TMDB finds three films with the exact title, OMDb is not asked: the file is left alone and the candidates are numbered for `--pick`, because another database would only add more guesses.
-2. **Every hit is verified.** The title must match exactly or as a whole-word prefix; for films the year must be within one; for shows the series name must match. A near miss counts as "nothing found".
-3. **A database that cannot be reached is not "nothing found".** A network outage, a bad key or a rate limit leaves the file untouched; it never leads to anything being renamed.
-4. **The source is named in the log**, e.g. `Identified 'The Film' (2023) as The Film (2023) — tt1234567, via OMDb (TMDB has no match)`.
+1. 🔴 **Several matches stop the chain.** If TMDB finds three films with the exact title, OMDb is not asked: the file is left alone and the candidates are numbered for `--pick`, because another database would only add more guesses.
+2. 🟢 **Every hit is verified.** The title must match exactly or as a whole-word prefix; for films the year must be within one; for shows the series name must match. A near miss counts as "nothing found".
+3. 🟠 **A database that cannot be reached is not "nothing found".** A network outage, a bad key or a rate limit leaves the file untouched; it never leads to anything being renamed.
+4. 🔵 **The source is named in the log**, e.g. `Identified 'The Film' (2023) as The Film (2023) — tt1234567, via OMDb (TMDB has no match)`.
+
+### Choosing between ambiguous titles
+
+When several titles share a name, the run stops for that file, lists them **numbered**, and saves the list. You pick by number and run again:
+
+```bat
+python MediaCleanup.py --movies --dry-run     :: lists the candidates, writes nothing
+python MediaCleanup.py --movies --pick 2 3    :: resolve titles 2 and 3 — films and shows can be mixed
+python MediaCleanup.py --movies --filter "The.Film.2026*" --imdb tt1111111   :: or give the id directly
+```
+
+> [!IMPORTANT]
+> Always pick from the **most recent** listing. The numbers are read back from `logs\pending_identity.csv` exactly as the last run wrote them, so a number always means the title you were shown. The full walkthrough, with sample output, is in [Troubleshooting](#troubleshooting).
 
 A film OMDb identifies is renamed with this script's own name template — `Title (Year) - ttNNNNNNN - Source.Resolution.Codec - [Languages]` — rather than through FileBot, so it works without FileBot reaching OMDb. Its tags come from OMDb's record of that id (genre, director, cast, plot, rating): thinner than TMDB's, but the film itself.
 
@@ -348,6 +430,9 @@ python MediaCleanup.py --rename --tv --input "D:\Downloads\Show" --force-audio-l
 python MediaCleanup.py --rename-undo
 ```
 
+> [!NOTE]
+> `--rename` identifies titles through the same [source chain](#titles-no-database-knows), so it can rename a film only OMDb lists. It never names a file from the file alone — that fallback belongs to the processing modes and `--cleantags`/`--cleanmetadata`.
+
 Details: requires exactly one of `--movies`/`--tv` (different databases + formats); the DB lookup uses a cleaned title query so filename noise doesn't mislead it; every rename is appended to `logs\rename_history.csv`; `--rename-undo` reverts the most recent batch (skipping files that moved since) and removes it from the history. Note the language bracket in the new name reflects the audio tags *inside* the file — fix `und` tracks with the force flags or the bracket may be wrong.
 
 ---
@@ -376,7 +461,12 @@ python MediaCleanup.py --subtitles
 
 ## Handling "und" (undefined language) tracks
 
-Hindi-dubbed releases often tag audio as `und` with a generic name like "2 channels". The script can't identify these automatically — tell it explicitly:
+Hindi-dubbed releases often tag audio as `und` with a generic name like "2 channels".
+
+> [!NOTE]
+> The script now tries to work these out itself (a lone unlabelled audio track takes the title's original language; subtitles are identified from their own text — see [Releases with no language tags](#releases-with-no-language-tags)). The explicit override below is for the cases it cannot call confidently, such as two or more unlabelled audio tracks.
+
+Tell it explicitly:
 
 ```bat
 :: Step 1 — inspect track IDs (video=0, first audio=1, ...)
@@ -416,11 +506,47 @@ python MediaCleanup.py --movies --similarity-threshold 0.80
 
 :: Full run, verbose, logged to file
 python MediaCleanup.py --verbose --log-file "logs\run.log"
+
+:: See which films are ambiguous, then resolve them by number
+python MediaCleanup.py --movies --dry-run
+python MediaCleanup.py --movies --pick 1 3
+
+:: Leave titles no database knows exactly as they are
+python MediaCleanup.py --movies --no-local-name
+
+:: Convert MP4 downloads you own into finished MKVs
+python MediaCleanup.py --mp4tomkv --movies --input "D:\Downloads"
+
+:: Tags + metadata + rename + poster for a folder, no remux
+python MediaCleanup.py --cleanmetadata --movies --input "D:\Media\Fixed"
 ```
 
 ---
 
 ## Troubleshooting
+
+| Symptom | Likely cause | Jump to |
+|---|---|---|
+| 🟡 `PARTIAL`, "pick one — …" | Several titles share the name | [A film left unrenamed](#troubleshooting) · [`--pick`](#choosing-between-ambiguous-titles) |
+| 🔵 `LOCAL` | No database knows the title | [A file was given a LOCAL name](#a-file-was-given-a-local-name) |
+| 🟡 `PARTIAL`, "no database could be reached" | Network, key or rate-limit problem | [Nothing renamed, "could be reached"](#nothing-renamed-no-database-could-be-reached) |
+| 🔴 Wrong poster or tags | A different title was matched | [Wrong metadata or poster](#troubleshooting) |
+| 🔴 FileBot errors | Java or `TEMP` path | [FileBot not renaming](#troubleshooting) |
+| ⚪ Files not merged | Different runtime, year or folder | [Files not grouped for merge](#troubleshooting) |
+
+### A file was given a LOCAL name
+
+No database that could be asked knew the title, so it was named from its own filename and the video's properties, and its tags were cleaned. Nothing was invented: no id, poster or description. Every such rename is listed in `logs\local_named.csv` (old path, new path, why).
+
+- If the title *is* in a database under a different spelling, rename the file to that spelling (or give `--imdb`) and run again — there is no id in the name, so it will be renamed normally.
+- To keep unknown titles exactly as they are, use `--no-local-name` or set `[naming] local_fallback = false`.
+- A film needs a plausible year in its filename and an episode needs a season and episode number; without them the file is left as it is and the reason is shown.
+
+### Nothing renamed, "no database could be reached"
+
+Every source that could have answered failed to — no key configured, a rejected key, no network, or a rate limit. The file is deliberately **not** treated as unknown: it is left untouched. Run `python MediaCleanup.py --validate-keys`, check your connection, and run again. OMDb's free tier allows about a thousand requests a day.
+
+### Everything else
 
 **"Config file not found" / "Missing required key"**
 Copy `MediaCleanup.example.toml` to `MediaCleanup.toml` and fill in the `[tools]` and `[paths]` sections. The file must sit in the same folder as the script.

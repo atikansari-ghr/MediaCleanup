@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 650" width="1320" height="650" role="img">
+<title>How MediaCleanup processes a library</title>
+<desc>Seven stages from scan to cover art, a fast path that skips the remux, and a chart of which command runs which stages.</desc>
+<defs><marker id="ae2e8f0" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1.5 1.5L8.5 5L1.5 8.5" fill="none" stroke="#e2e8f0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="afbbf24" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1.5 1.5L8.5 5L1.5 8.5" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0.75" y="0.75" width="1318.5" height="648.5" rx="18" fill="#0b1220" stroke="#1e293b" stroke-width="1.5"/>
+<text x="54" y="44" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">How MediaCleanup processes a library</text>
+<text x="54" y="68" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="14" font-weight="400" fill="#94a3b8" text-anchor="start">One run fully finishes every file — and every stage can also be run on its own.</text>
+<rect x="54" y="150" width="156" height="100" rx="14" fill="#2563eb" stroke="#60a5fa" stroke-width="1.5"/>
+<text x="132.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">1  Scan &amp; filter</text>
+<text x="132.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">--input  --filter</text>
+<text x="132.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">finds every .mkv</text>
+<line x1="212" y1="200.0" x2="227" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="230" y="150" width="156" height="100" rx="14" fill="#2563eb" stroke="#60a5fa" stroke-width="1.5"/>
+<text x="308.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">2  Group variants</text>
+<text x="308.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">same title + year</text>
+<text x="308.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dbeafe" text-anchor="middle">same runtime</text>
+<line x1="388" y1="200.0" x2="403" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="406" y="150" width="156" height="100" rx="14" fill="#7c3aed" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="484.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">3  Select tracks</text>
+<text x="484.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">best video (HEVC)</text>
+<text x="484.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">your languages only</text>
+<line x1="564" y1="200.0" x2="579" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="582" y="150" width="156" height="100" rx="14" fill="#7c3aed" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="660.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">4  Remux</text>
+<text x="660.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">mkvmerge, lossless</text>
+<text x="660.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ede9fe" text-anchor="middle">sources only read</text>
+<line x1="740" y1="200.0" x2="755" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="758" y="150" width="156" height="100" rx="14" fill="#0d9488" stroke="#5eead4" stroke-width="1.5"/>
+<text x="836.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">5  Clean tags</text>
+<text x="836.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ccfbf1" text-anchor="middle">ads and junk removed</text>
+<text x="836.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#ccfbf1" text-anchor="middle">rich tags, by id</text>
+<line x1="916" y1="200.0" x2="931" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="934" y="150" width="156" height="100" rx="14" fill="#16a34a" stroke="#86efac" stroke-width="1.5"/>
+<text x="1012.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">6  Identify, rename</text>
+<text x="1012.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dcfce7" text-anchor="middle">TMDB, OMDb, TVmaze</text>
+<text x="1012.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#dcfce7" text-anchor="middle">else a LOCAL name</text>
+<line x1="1092" y1="200.0" x2="1107" y2="200.0" stroke="#e2e8f0" stroke-width="2" marker-end="url(#ae2e8f0)"/>
+<rect x="1110" y="150" width="156" height="100" rx="14" fill="#db2777" stroke="#f9a8d4" stroke-width="1.5"/>
+<text x="1188.0" y="188.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">7  Cover art</text>
+<text x="1188.0" y="208.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#fce7f3" text-anchor="middle">poster of the</text>
+<text x="1188.0" y="225.0" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#fce7f3" text-anchor="middle">verified title</text>
+<path d="M308.0 147 C308.0 88 836.0 88 836.0 147" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#afbbf24)"/>
+<text x="572.0" y="91" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#fbbf24" text-anchor="middle">Already clean?  Skip the remux.</text>
+<text x="54" y="300" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="18" font-weight="700" fill="#ffffff" text-anchor="start">Which command runs which stages</text>
+<rect x="54" y="314" width="156" height="234" rx="10" fill="#2563eb" fill-opacity="0.13"/>
+<text x="132.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#60a5fa" text-anchor="middle">1</text>
+<rect x="230" y="314" width="156" height="234" rx="10" fill="#2563eb" fill-opacity="0.13"/>
+<text x="308.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#60a5fa" text-anchor="middle">2</text>
+<rect x="406" y="314" width="156" height="234" rx="10" fill="#7c3aed" fill-opacity="0.13"/>
+<text x="484.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#a78bfa" text-anchor="middle">3</text>
+<rect x="582" y="314" width="156" height="234" rx="10" fill="#7c3aed" fill-opacity="0.13"/>
+<text x="660.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#a78bfa" text-anchor="middle">4</text>
+<rect x="758" y="314" width="156" height="234" rx="10" fill="#0d9488" fill-opacity="0.13"/>
+<text x="836.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#5eead4" text-anchor="middle">5</text>
+<rect x="934" y="314" width="156" height="234" rx="10" fill="#16a34a" fill-opacity="0.13"/>
+<text x="1012.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#86efac" text-anchor="middle">6</text>
+<rect x="1110" y="314" width="156" height="234" rx="10" fill="#db2777" fill-opacity="0.13"/>
+<text x="1188.0" y="329" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#f9a8d4" text-anchor="middle">7</text>
+<rect x="54" y="332" width="1212" height="28" rx="14" fill="#4f46e5" stroke="#a5b4fc" stroke-width="1.2"/>
+<text x="68" y="351" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="start">python MediaCleanup.py</text>
+<text x="241.8" y="351" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#e0e7ff" text-anchor="start">everything, in one run</text>
+<rect x="758" y="368" width="156" height="28" rx="14" fill="#0d9488" stroke="#5eead4" stroke-width="1.2"/>
+<text x="772" y="387" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="start">--cleantags</text>
+<rect x="934" y="404" width="156" height="28" rx="14" fill="#16a34a" stroke="#86efac" stroke-width="1.2"/>
+<text x="948" y="423" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="start">--rename</text>
+<rect x="1110" y="440" width="156" height="28" rx="14" fill="#db2777" stroke="#f9a8d4" stroke-width="1.2"/>
+<text x="1124" y="459" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="start">--coverart</text>
+<rect x="758" y="476" width="508" height="28" rx="14" fill="#0891b2" stroke="#67e8f9" stroke-width="1.2"/>
+<text x="772" y="495" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#ffffff" text-anchor="start">--cleanmetadata</text>
+<text x="890.5" y="495" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#cffafe" text-anchor="start">tags + rename + poster, no remux</text>
+<rect x="582" y="512" width="684" height="28" rx="14" fill="#f59e0b" stroke="#fde68a" stroke-width="1.2"/>
+<text x="596" y="531" font-family="Consolas,'SFMono-Regular','Courier New',monospace" font-size="13" font-weight="700" fill="#1f2937" text-anchor="start">--mp4tomkv</text>
+<text x="675.0" y="531" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#451a03" text-anchor="start">MP4 to MKV, then finish it</text>
+<text x="54" y="578" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#ffffff" text-anchor="start">Built-in safeguards</text>
+<rect x="54" y="590" width="250" height="34" rx="17.0" fill="#16a34a" fill-opacity="0.18"/>
+<rect x="54" y="590" width="250" height="34" rx="17.0" fill="none" stroke="#86efac" stroke-width="1.2"/>
+<text x="179.0" y="611.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#86efac" text-anchor="middle">Sources are only read</text>
+<rect x="322" y="590" width="330" height="34" rx="17.0" fill="#2563eb" fill-opacity="0.18"/>
+<rect x="322" y="590" width="330" height="34" rx="17.0" fill="none" stroke="#60a5fa" stroke-width="1.2"/>
+<text x="487.0" y="611.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#60a5fa" text-anchor="middle">Output is written to .tmp, then renamed</text>
+<rect x="670" y="590" width="280" height="34" rx="17.0" fill="#7c3aed" fill-opacity="0.18"/>
+<rect x="670" y="590" width="280" height="34" rx="17.0" fill="none" stroke="#a78bfa" stroke-width="1.2"/>
+<text x="810.0" y="611.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#a78bfa" text-anchor="middle">--dry-run previews everything</text>
+<rect x="968" y="590" width="260" height="34" rx="17.0" fill="#db2777" fill-opacity="0.18"/>
+<rect x="968" y="590" width="260" height="34" rx="17.0" fill="none" stroke="#f9a8d4" stroke-width="1.2"/>
+<text x="1098.0" y="611.5" font-family="'Segoe UI',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#f9a8d4" text-anchor="middle">Ledgers make reruns instant</text>
+</svg>

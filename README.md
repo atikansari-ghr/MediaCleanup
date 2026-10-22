@@ -1,94 +1,57 @@
-# MediaCleanup
+<div align="center">
+
+# 🎞️ MediaCleanup
+
+**Clean, merge, tag and name your MKV library — and never guess a title.**
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
+![Version](https://img.shields.io/badge/version-1.11.0-db2777)
 
-Windows MKV media cleanup, merge, and tagging tool built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding.
+[**Quick start**](#-quick-start) · [**How it works**](#-how-it-works) · [**Commands**](#-which-command-do-i-need) · [**Usage guide**](docs/USAGE.md) · [**Configuration**](docs/CONFIGURATION.md) · [**Changelog**](CHANGELOG.md)
 
-For **movies**: scans a folder, groups variant releases of the same movie (e.g. a Telugu release + a Hindi/English release), selects the best video track (HEVC preferred), collects **all audio tracks in your target languages** from every variant (configurable — default Hindi/English/Telugu, any ISO 639 language), keeps target-language subtitles, and merges everything into one clean MKV. Every processed file is fully finished in one run: tags cleaned, metadata + cover art embedded, renamed via FileBot. A title is identified before it is renamed (films: TMDB, then OMDb; shows: TheTVDB/TMDB, then TVmaze), never by taking a search's first hit; one that no database knows is named from facts in its own file and reported `LOCAL`.
+<br>
 
-For **TV**: applies the same track selection and tag cleaning to each episode file.
+<img src="docs/images/pipeline.svg" alt="MediaCleanup pipeline: scan, group, select tracks, remux, clean tags, identify and rename, cover art" width="100%">
 
-Plus standalone maintenance modes:
+</div>
 
-- `--cleantags` — strip promotional tags, advertising attachments, and junk track names in-place, no remux; embeds full metadata (genre, director, cast, synopsis, ratings) when API keys are configured.
-- `--coverart` — fetch movie/show posters (TMDB → fanart.tv → OMDb, or a local `poster.jpg`) and embed them as MKV cover art, with an HTML review gallery.
-- `--rename` — FileBot-rename messy filenames into a canonical format, with full undo.
-- `--subtitles` — download missing subtitles from OpenSubtitles as sidecar `.srt` files.
-- `--clear` — removal modifier: wipe all tags (`--cleantags --clear`) or remove embedded cover art (`--coverart --clear`).
+<br>
 
-## In action
+Windows MKV media tool built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding. Point it at a folder; it hands back a library that Plex, Jellyfin, Kodi and VLC all read the same way.
 
-Rename messy filenames with a safe preview first — real database lookups, exact proposed names:
+> [!TIP]
+> New here? Run `python MediaCleanup.py --dry-run --verbose` first. Every mode previews exactly what it would do — names, tags, commands — and writes nothing.
 
-![Rename preview](docs/images/rename-preview.svg)
+## ✨ What it does
 
-Embed cover art across the library — every poster audited in an HTML review gallery:
+| | | |
+|---|---|---|
+| 🎬 **Movies** | Groups variant releases of one film (say a Telugu release and a Hindi/English one), picks the best video (HEVC preferred), gathers **every audio track in your target languages** from all variants, keeps matching subtitles, and merges it all into one clean MKV. | Default targets are Hindi, English and Telugu. Any ISO 639 language works. |
+| 📺 **TV** | The same track selection and tag cleaning, applied to each episode. | Renewed shows are handled: a later season's year is not the show's debut year. |
+| 🏷️ **Tags** | Strips promotional tags and advertising attachments, writes a clean title, and embeds genre, director, cast, synopsis and ratings **by verified id**. | Never from a title search that could return another film. |
+| 🖼️ **Cover art** | Embeds a poster of the verified title (TMDB → fanart.tv → OMDb, or your own `poster.jpg`) with an HTML review gallery. | An unidentified title keeps whatever cover it has. |
+| 🧭 **Identification** | A title is identified **before** it is renamed, through several databases, and refused when it is ambiguous. | New in 1.11: OMDb for films, TVmaze for shows. |
+| 🛟 **LOCAL names** | A title no database knows is named from facts in its own file instead of keeping its release name. | Reported separately as `LOCAL`; nothing is invented. |
+| 🔤 **Languages** | Works out what `und` tracks really are: audio from the title's original language, subtitles from their own text. | 42 of 42 correct on a 42-language test release. |
+| 📦 **MP4 → MKV** | Lossless remux with sidecar `.srt`, advertising cues removed, forced-subtitle detection, then the full finishing chain. | Your `.mp4` and `.srt` are never touched. |
 
-![Cover art run](docs/images/coverart.svg)
+Plus standalone maintenance modes, each runnable on its own:
 
-Verify your API keys before spending any quota:
-
-![API key validation](docs/images/validate-keys.svg)
-
-## How it works
-
-```mermaid
-flowchart LR
-    A[/"Messy media files"/] --> B["Scan & group<br/>variant releases"]
-    B --> C["Pick best video<br/>(HEVC preferred)"]
-    B --> D["Collect ALL target-language<br/>audio & subtitles"]
-    C --> E["Remux into one clean MKV<br/>(atomic — sources untouched)"]
-    D --> E
-    B -.->|"already clean:<br/>skip remux"| F
-    E --> F["Clean tags & embed<br/>metadata + cover art"]
-    F --> G["FileBot rename to<br/>canonical format"]
-    G --> H[/"Plex / Jellyfin-ready library"/]
-```
-
-## Intended use
-
-MediaCleanup organises **media you already own** — your own disc rips, purchased
-digital downloads, recordings, and home video. It is a local file manager in the
-same family as MKVToolNix, FileBot and tinyMediaManager:
-
-- It **downloads no media** and contains none. It only reads and rewrites files you point it at.
-- It **circumvents no copy protection** and cannot open encrypted discs or DRM-protected files.
-- It changes **container metadata and track selection** — filenames, tags, cover art, subtitle sidecars.
-
-You are responsible for having the right to the files you process.
-
-## Requirements
-
-| Requirement | Notes |
+| Mode | What it does |
 |---|---|
-| Windows 10/11 | Uses Windows long-path handling; paths are Windows-style |
-| Python 3.11+ | Standard library only — no pip installs required |
-| [MKVToolNix](https://mkvtoolnix.download/) | `mkvmerge` + `mkvpropedit` (+ `mkvextract` for IMDB tag reads) |
-| [FileBot](https://www.filebot.net/) | *Optional* — canonical renaming via TheMovieDB/TheTVDB |
-| [rich](https://pypi.org/project/rich/) | *Optional (recommended)* — colored output + summary tables (`pip install rich`) |
-| [Pillow](https://pypi.org/project/pillow/) | *Optional* — downscales oversized local posters for `--coverart` |
+| `--cleantags` | Strip junk tags, ad attachments and track names in place — no remux — and embed full metadata when API keys are set. |
+| `--coverart` | Fetch and embed posters, with an HTML review gallery. |
+| `--cleanmetadata` | `--cleantags` and `--coverart` in one command. With `--clear`, wipe tags **and** covers and never rename. |
+| `--rename` | FileBot-rename messy filenames into a canonical format, with full undo. |
+| `--mp4tomkv` | Convert MP4/M4V into finished MKVs beside the source. |
+| `--subtitles` | Download missing subtitles from OpenSubtitles as sidecar `.srt` files. |
+| `--clear` | Removal modifier: wipe all tags, or remove embedded cover art. |
 
-## Folder layout
-
-Runtime tools live inside the project — drop them into the committed skeleton and the default config finds them automatically (relative paths resolve against the script folder). See [runtimes/README.md](runtimes/README.md) for details.
-
-```
-MediaCleanup\
-├── MediaCleanup.py              ← the tool
-├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
-├── MediaCleanup.toml            ← your config + API keys (git-ignored)
-├── runtimes\                    ← portable tools (binaries git-ignored)
-│   ├── mkvtoolnix\              ←   REQUIRED: extract MKVToolNix portable here
-│   └── FileBot\                 ←   OPTIONAL: portable FileBot here
-├── logs\                        ← rename history, cover art ledger + reviews (auto-created)
-└── docs\                        ← usage & configuration guides
-```
-
-## Quick start
+## 🚀 Quick start
 
 ```bat
 :: 1. Get the code
@@ -111,74 +74,176 @@ python MediaCleanup.py --dry-run --verbose
 python MediaCleanup.py
 ```
 
-## Common commands
+> [!NOTE]
+> All paths and API keys live in `MediaCleanup.toml`. The script has no hardcoded locations, and relative paths resolve against the script folder, so a cloned project with tools in `runtimes\` works wherever it sits.
+
+## 🧩 How it works
+
+One run fully finishes every file. The pipeline above has seven stages; a file that is already clean skips the remux, and every stage after the remux can also be run on its own with the modes in the table.
+
+### Identification — nothing is guessed
+
+The step that decides what a file **is** gets the most care, because a wrong answer would be written into the filename, the tags and the poster, and every later run would trust it.
+
+<div align="center">
+<img src="docs/images/identify.svg" alt="Identification chain: films try TMDB then OMDb, shows try TheTVDB and TMDB then TVmaze; a verified match renames by id, otherwise the file is named from itself" width="100%">
+</div>
+
+| Rule | Why |
+|---|---|
+| 🔵 **A source is passed over only when it found nothing.** | If TMDB finds three films with the same name, asking OMDb would only add more guesses. |
+| 🟢 **Every hit is verified.** | Exact title (or whole-word prefix), year within one for films, series name for shows. A near miss is "nothing found". |
+| 🔴 **Several matches stop the run for that title.** | The file is left alone and the candidates are numbered. You choose with `--pick N`. |
+| 🟠 **An unreachable database is not "nothing found".** | A network outage or bad key leaves the file untouched; it never triggers a rename. |
+| 🟣 **A title found nowhere is named from its own file.** | `Movie (2023) - WebRip.1080p.x264 - [Hindi + English].mkv`, reported `LOCAL`, with no id, poster or description added. |
+
+### Reading the results
+
+Every run ends with a summary table. The status column tells you exactly what happened to each file:
+
+| Status | Meaning |
+|---|---|
+| 🟢 **OK** | Processed, and renamed from a verified database match. |
+| 🔵 **LOCAL** | No database knows the title. Named and tag-cleaned from the file alone; listed in `logs\local_named.csv`. |
+| 🟡 **PARTIAL** | Processed, but **not renamed** — several titles share the name (pick one), or the rename failed. The reason is shown. |
+| ⚪ **SKIP** | Nothing to do: already covered, already named, or a film too ambiguous to give a poster. |
+| 🔴 **FAIL** | Something went wrong. The reason is shown, and the sources are untouched. |
+
+### Choosing between ambiguous titles
 
 ```bat
-python MediaCleanup.py --movies                          :: movies only
-python MediaCleanup.py --tv                              :: TV only
-python MediaCleanup.py --movies --input "D:\Downloads"   :: specific folder
-python MediaCleanup.py --movies --filter "A*"            :: only titles starting with A
-python MediaCleanup.py --movies --inplace --backup       :: replace sources, keep .original.mkv
-python MediaCleanup.py --audio-langs Telugu Hindi        :: keep only these languages this run
-python MediaCleanup.py --cleantags                       :: clean tags + metadata, no remux
-python MediaCleanup.py --coverart                        :: embed cover art in-place
-python MediaCleanup.py --cleanmetadata                   :: tags + metadata + rename + cover art, no remux
-python MediaCleanup.py --cleanmetadata --clear           :: wipe tags AND cover art, never renames
-python MediaCleanup.py --rename --movies --input "D:\Downloads"  :: FileBot-rename downloads
-python MediaCleanup.py --rename-undo                     :: revert the last rename batch
-python MediaCleanup.py --subtitles                       :: download missing sidecar subs
-python MediaCleanup.py --mp4tomkv --movies               :: MP4 (+ sidecar .srt) -> finished MKV
-python MediaCleanup.py --validate-keys                   :: test all configured API keys
-python MediaCleanup.py --tv --force-audio-lang 1 Hindi   :: fix "und" mislabeled tracks
-python MediaCleanup.py --cleantags --clear               :: strip all tags/title/track names
-python MediaCleanup.py --coverart --clear                :: remove embedded cover art
+python MediaCleanup.py --movies --dry-run        :: lists numbered candidates, writes nothing
+python MediaCleanup.py --movies --pick 2 3       :: resolve titles 2 and 3, films and shows alike
 ```
 
-Every mode supports `--dry-run` to preview and `--filter`/`--input` to scope the run.
+The numbers are saved to `logs\pending_identity.csv` and read back, never recomputed, so a number always means the title you were shown.
 
-## Output naming
+## 🧭 Which command do I need?
+
+| I want to… | Run |
+|---|---|
+| Process everything and finish every file | `python MediaCleanup.py` |
+| Only movies, or only TV | `--movies` · `--tv` |
+| Work on one folder | `--movies --input "D:\Downloads"` |
+| Only titles starting with A | `--movies --filter "A*"` |
+| Replace the sources, keep a safety copy | `--movies --inplace --backup` |
+| Keep only some audio languages this run | `--audio-langs Telugu Hindi` |
+| Clean tags and add metadata, no remux | `--cleantags` |
+| Add posters everywhere | `--coverart` |
+| Tags + metadata + rename + poster, no remux | `--cleanmetadata` |
+| Wipe tags and covers, never rename | `--cleanmetadata --clear` |
+| Rename messy filenames | `--rename --movies --input "D:\Downloads"` |
+| Undo the last rename batch | `--rename-undo` |
+| Convert MP4 (+ `.srt`) to finished MKV | `--mp4tomkv --movies` |
+| Fetch missing subtitles | `--subtitles` |
+| Fix mislabelled `und` tracks | `--tv --force-audio-lang 1 Hindi` |
+| Leave unknown titles exactly as they are | `--no-local-name` |
+| Test all my API keys | `--validate-keys` |
+
+Every mode supports `--dry-run` to preview and `--filter` / `--input` to scope the run.
+
+## 🔎 In action
+
+Rename messy filenames with a safe preview first — real database lookups, exact proposed names:
+
+![Rename preview](docs/images/rename-preview.svg)
+
+Embed cover art across the library — every poster audited in an HTML review gallery:
+
+![Cover art run](docs/images/coverart.svg)
+
+Verify your API keys before spending any quota:
+
+![API key validation](docs/images/validate-keys.svg)
+
+## 🏷️ Output naming
 
 ```
-Movies:  Night of the Living Dead (1968) - tt0063350 - WEB-DL.1080p.x264 - [Hindi + English].mkv
-TV:      Show Name (2019) - S01E01 - Episode Title - 1080p.x265 - [English].mkv
+Movie:        Night of the Living Dead (1968) - tt0063350 - WEB-DL.1080p.x264 - [Hindi + English].mkv
+Episode:      Show Name (2019) - S01E01 - Episode Title - 1080p.x265 - [English].mkv
+LOCAL film:   Movie (2023) - WebRip.1080p.x264 - [Hindi + English].mkv            (no database knew it)
+LOCAL show:   Show Name - S01E02 - 1080p.x264 - [English].mkv                     (no database knew it)
 ```
 
-## Safety model
+## 🛡️ Safety model
 
-- Remux inputs are only ever **read** — output is built elsewhere and originals stay untouched (unless you explicitly opt into `--inplace`, which verifies the output before any source is replaced and offers `--backup`).
-- Output is written to a `.tmp` file, then atomically renamed into place.
-- `--dry-run` previews every action, including mkvmerge command lines, without writing anything.
-- In-place modes (`--cleantags`, `--coverart`, and the skip-remux fast path) edit metadata/attachments only — never the media streams.
+> [!IMPORTANT]
+> Remux inputs are only ever **read**. Output is built elsewhere and your originals stay untouched — unless you opt into `--inplace`, which verifies the output (track counts and duration) before any source is replaced and offers `--backup`.
 
-## Documentation
+- ✅ Output is written to a `.tmp` file, then atomically renamed into place.
+- ✅ `--dry-run` previews every action, including the mkvmerge command lines, without writing anything.
+- ✅ In-place modes (`--cleantags`, `--coverart`, and the skip-remux fast path) edit metadata and attachments only — never the media streams.
+- ✅ Ledgers (`logs\coverart_done.csv`, `logs\mp4tomkv_done.csv`, `logs\local_named.csv`, `logs\rename_history.csv`) make reruns cheap and every automatic decision auditable.
+- ✅ A title is never renamed, tagged or given a poster on a guess: ambiguous means *ask*, unreachable means *wait*.
+
+## 📋 Requirements
+
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 | Uses Windows long-path handling; paths are Windows-style |
+| Python 3.11+ | Standard library only — no pip installs required |
+| [MKVToolNix](https://mkvtoolnix.download/) | `mkvmerge` + `mkvpropedit` (+ `mkvextract` for IMDB tag reads) |
+| [FileBot](https://www.filebot.net/) | *Optional* — canonical renaming via TheMovieDB/TheTVDB/TVmaze |
+| API keys | *Optional* — TMDB (primary), OMDb (second film source), fanart.tv (posters), OpenSubtitles. See [CONFIGURATION](docs/CONFIGURATION.md) |
+| [rich](https://pypi.org/project/rich/) | *Optional (recommended)* — colored output + summary tables (`pip install rich`) |
+| [Pillow](https://pypi.org/project/pillow/) | *Optional* — downscales oversized local posters for `--coverart` |
+
+## 📁 Folder layout
+
+Runtime tools live inside the project — drop them into the committed skeleton and the default config finds them automatically. See [runtimes/README.md](runtimes/README.md) for details.
+
+```
+MediaCleanup\
+├── MediaCleanup.py              ← the tool
+├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
+├── MediaCleanup.toml            ← your config + API keys (git-ignored)
+├── runtimes\                    ← portable tools (binaries git-ignored)
+│   ├── mkvtoolnix\              ←   REQUIRED: extract MKVToolNix portable here
+│   └── FileBot\                 ←   OPTIONAL: portable FileBot here
+├── logs\                        ← rename history, ledgers, pending list, reviews (auto-created)
+└── docs\                        ← usage & configuration guides, diagrams
+```
+
+## ⚖️ Intended use
+
+MediaCleanup organises **media you already own** — your own disc rips, purchased digital downloads, recordings, and home video. It is a local file manager in the same family as MKVToolNix, FileBot and tinyMediaManager:
+
+- It **downloads no media** and contains none. It only reads and rewrites files you point it at.
+- It **circumvents no copy protection** and cannot open encrypted discs or DRM-protected files.
+- It changes **container metadata and track selection** — filenames, tags, cover art, subtitle sidecars.
+
+You are responsible for having the right to the files you process.
+
+## 📚 Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/USAGE.md](docs/USAGE.md) | Full usage guide — every flag, workflows, recipes, troubleshooting |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `MediaCleanup.toml` key explained |
+| 📖 [docs/USAGE.md](docs/USAGE.md) | The full usage guide — every flag, every workflow, how identification works, recipes and troubleshooting |
+| ⚙️ [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `MediaCleanup.toml` key explained, with a full annotated example |
+| 📝 [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
 
-## Credits
+## 🙏 Credits
 
 Metadata and artwork come from third-party services, used under their respective terms:
 
 - This product uses the **TMDB** API but is not endorsed or certified by TMDB.
 - Artwork may be sourced from **fanart.tv**.
-- Ratings and certifications may be sourced from **OMDb**.
+- Film identification, ratings and certifications may be sourced from **OMDb**.
+- Show identification may use **TVmaze**, through FileBot.
 - Subtitles are downloaded from **OpenSubtitles.com** using your own account.
 
-MKVToolNix, FileBot, Plex and Jellyfin are trademarks of their respective owners;
-this project is an independent tool that works alongside them.
+MKVToolNix, FileBot, Plex and Jellyfin are trademarks of their respective owners; this project is an independent tool that works alongside them.
 
-## Support
+## ☕ Support
 
 If this project saved you time, you can support its development:
 
 [![Support on Ko-fi](https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/atikansari)
 
-## Author
+## 👤 Author
 
 **Atik Ansari** — [github.com/atikansari-ghr](https://github.com/atikansari-ghr)
 
-## License
+## 📄 License
 
 [MIT](LICENSE) — free to use, modify, and share.

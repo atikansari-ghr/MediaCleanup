@@ -1,14 +1,38 @@
-# MediaCleanup — Configuration Reference
+<div align="center">
+
+# ⚙️ MediaCleanup — Configuration Reference
+
+**Every `MediaCleanup.toml` key, and what it switches on.**
+
+[📖 Usage guide](USAGE.md) · [🏠 README](../README.md) · [📝 Changelog](../CHANGELOG.md)
+
+</div>
+
+<br>
 
 All configuration lives in **`MediaCleanup.toml`**, which must sit in the same folder as `MediaCleanup.py`. The script resolves it relative to its own location, so it works no matter which directory you run from.
 
 Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
+> [!CAUTION]
 > `MediaCleanup.toml` is git-ignored because it contains your private API keys and machine-specific paths. Never commit it; share `MediaCleanup.example.toml` instead.
 
-TOML tip: use **single-quoted literal strings** for Windows paths — backslashes need no escaping: `movies_root = 'D:\Media\Movies'`.
+> [!TIP]
+> Use **single-quoted literal strings** for Windows paths — backslashes need no escaping: `movies_root = 'D:\Media\Movies'`.
 
 **Relative paths resolve against the script folder** (not your current directory). The example config uses `runtimes\mkvtoolnix` and `runtimes\FileBot\filebot.exe`, so a fresh clone works as soon as the tools are dropped into `runtimes\` — see [runtimes/README.md](../runtimes/README.md). Absolute paths are used as-is.
+
+## 🗺️ What each section controls
+
+| Section | Controls | Required |
+|---|---|---|
+| 🔧 [`[tools]`](#tools) | Where MKVToolNix lives | 🔴 Yes |
+| 🎞️ [`[filebot]`](#filebot) | Optional FileBot renaming | ⚪ No |
+| 📁 [`[paths]`](#paths) | Movie, TV and output folders | 🔴 Yes |
+| 🏷️ [`[naming]`](#naming) | Prefix stripping, and the LOCAL-name fallback | ⚪ No |
+| 🔤 [`[languages]`](#languages) | Which audio languages are kept; `und` detection | ⚪ No |
+| 🔑 [`[coverart]`](#coverart) | TMDB, fanart.tv and OMDb keys — posters, tags, identification | ⚪ No (strongly recommended) |
+| 💬 [`[subtitles]`](#subtitles) | OpenSubtitles credentials | ⚪ No |
 
 ---
 
@@ -29,7 +53,10 @@ TOML tip: use **single-quoted literal strings** for Windows paths — backslashe
 | Key | Required | Description |
 |---|---|---|
 | `exe` | No | Path to `filebot.exe`. If omitted or nonexistent, all FileBot steps are skipped and the script uses its built-in filename heuristics. |
-| `db` | No | Movie database for FileBot lookups. Default: `"TheMovieDB"`. TV always uses TheTVDB. |
+| `db` | No | Movie database for FileBot lookups. Default: `"TheMovieDB"`. TV uses TheTVDB first, with TMDB and then TVmaze as fallbacks for a series TheTVDB cannot identify. |
+
+> [!NOTE]
+> FileBot is optional. Without it, films are still identified through TMDB and OMDb and can still be named, but TV episodes are renamed only through FileBot.
 
 ## `[paths]`
 
@@ -62,7 +89,6 @@ local_fallback = true
 | Key | Required | Description |
 |---|---|---|
 | `targets` | No (default `["hin", "eng", "tel"]`) | Audio languages to **keep** — all others are stripped during remux. **List order = audio track order** in output files. Accepts every form — ISO 639-1 (`ko`), ISO 639-2 B/T (`kor`/`fra`), full English names (`Korean`) — against the complete built-in ISO 639 registry (189 languages). |
-
 | `detect_undetermined` | No (default `true`) | Identify tracks tagged `und` instead of discarding them. A lone unlabelled audio track takes the title's TMDB original language; unlabelled text subtitles are identified from their own text. Anything that cannot be called confidently stays `und`. Per-run override: `--no-lang-detect`. |
 
 Everything language-related derives from this list: track detection (including native-script track names for Indian languages), the display names in the filename `[...]` bracket, which subtitles are kept, what `--audio-langs`/`--force-audio-lang` accept, and the poster-language preference for cover art (English always first, then your targets). The video track language is set separately from the title's TMDB original language (override: `--force-video-lang`).
@@ -73,7 +99,15 @@ API keys used by **both** `--coverart` (poster fetching) and rich metadata taggi
 
 Verify your keys anytime with `python MediaCleanup.py --validate-keys`.
 
+> [!WARNING]
 > Watch the key formats: TMDB and fanart.tv keys are 32 hex characters; OMDb keys are 8. If validation says a key is invalid, check you didn't swap them.
+
+| Source | Posters | Tags | Identifies titles | Free tier |
+|---|---|---|---|---|
+| 🔵 **TMDB** | ✅ primary | ✅ primary | ✅ films and shows | generous |
+| 🟣 **OMDb** | ✅ last resort | ✅ thinner, by id | ✅ second source for **films** | ~1,000 requests/day |
+| 🟠 **fanart.tv** | ✅ first fallback | — | — | personal key |
+| 🟢 **TVmaze** | — | — | ✅ third source for **shows** (via FileBot) | no key needed |
 
 | Key | Description |
 |---|---|
@@ -90,6 +124,45 @@ Credentials for the `--subtitles` mode (OpenSubtitles.com REST API). All three c
 | `api_key` | OpenSubtitles API key — register a consumer at <https://www.opensubtitles.com/en/consumers>. |
 | `username` / `password` | Your opensubtitles.com account login (downloads are per-user; free ≈ 20/day, VIP ≈ 1000/day). |
 | `languages` | List of ISO 639-1 codes to download, default `["en"]`. One language → sidecar named `<mkv stem>.srt`; extra languages get `.hin.srt`-style suffixes. |
+
+---
+
+## 🧪 A complete example
+
+Every section in one file, with the defaults spelled out. Copy `MediaCleanup.example.toml` rather than this block — it carries the same keys with more comments.
+
+```toml
+[tools]
+mkvtoolnix_dir = 'runtimes\mkvtoolnix'
+
+[filebot]                              # optional
+exe = 'runtimes\FileBot\filebot.exe'
+db  = "TheMovieDB"
+
+[paths]
+movies_root = 'D:\Media\Movies'
+tv_root     = 'D:\Media\TV'
+output_root = 'D:\Media\Fixed'
+
+[naming]
+strip_prefixes = []                    # names stamped on files with no web address
+local_fallback = true                  # name unknown titles from the file itself (LOCAL)
+
+[languages]
+targets = ["hin", "eng", "tel"]        # kept audio languages; list order = track order
+detect_undetermined = true             # work out what 'und' tracks really are
+
+[coverart]                             # every key optional
+tmdb_api_key     = ""                  # primary source for everything
+omdb_api_key     = ""                  # second film source, thinner tags, last-resort posters
+fanarttv_api_key = ""                  # curated posters
+
+[subtitles]                            # --subtitles only
+api_key   = ""
+username  = ""
+password  = ""
+languages = ["en"]
+```
 
 ---
 

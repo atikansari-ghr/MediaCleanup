@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - `--rename` identifies a film through the same chain, so a film only OMDb lists can be renamed (in place or with `--rename-into`). It never names a file from the file alone; that fallback belongs to the processing modes and `--cleantags`/`--cleanmetadata`.
 - OMDb's search results are kept for the run; the free tier allows about a thousand requests a day.
 
+### Documentation
+- **New diagrams** in `docs/images/`: `pipeline.svg` (the seven stages, the fast path that skips the remux, and a chart of which command runs which stages) and `identify.svg` (how a title is identified through the source chain, and what happens when every source finds nothing).
+- **README rewritten as a visual user guide:** feature table, "which command do I need?" table, a status legend for the summary table (OK, LOCAL, PARTIAL, SKIP, FAIL), the identification rules, and callouts for the safety model.
+- **Usage guide:** a "where to look" index, a stage-by-stage description of a run, a "reading the results" section, a symptom table at the top of Troubleshooting, and new entries for `LOCAL` names and unreachable databases. Corrected two stale statements (cover-art source chain; `und` track handling).
+- **Configuration reference:** a section map, a table of what each API key unlocks, and a complete annotated example.
+
 ## [1.10.0] — 2026-10-04
 
 This release also contains everything in 1.6.1 through 1.9.2 below. Those were development milestones and were never tagged on their own, so 1.10.0 follows 1.6.0 directly.
