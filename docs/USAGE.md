@@ -84,6 +84,7 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--pick N [N …]` | Identify films or TV shows by the numbers shown in the previous run's candidate list, e.g. `--pick 1 3`. One number per title; movies and shows can be mixed in one command. |
 | `--imdb ttNNNNNNN` | Identify the film in scope as this IMDB id, when the title is too ambiguous to resolve. Requires `--filter` or `--input` so it applies to one film. The id is written into the file's tags, so it is only ever needed once. |
 | `--no-lang-detect` | Do not try to identify tracks tagged `und` (see [Releases with no language tags](#releases-with-no-language-tags)). Config equivalent: `[languages] detect_undetermined = false`. |
+| `--no-local-name` | Leave a title that no database knows exactly as it is, instead of naming it from its own file (see [Titles no database knows](#titles-no-database-knows)). Config equivalent: `[naming] local_fallback = false`. |
 | `--skip-cleantags` | Disable the automatic tag-clean that runs after each remux. |
 | `--skip-coverart` | Disable the automatic cover art embed at the end of the pipeline. |
 | `--include-forced-subs` | Allow forced-flag subtitle selection. |
@@ -224,7 +225,7 @@ API keys go in the `[coverart]` section of `MediaCleanup.toml`. Missing keys sim
 python MediaCleanup.py --coverart --pick 2
 ```
 
-**Shows follow the same rule, for the rename as well.** A series is identified before its episodes are renamed, and FileBot is handed the series by id rather than searching for it, so it cannot land on a similarly named show. When more than one series shares the exact title the file is left unrenamed, reported `PARTIAL` with its candidates, and `--pick` resolves it. A show TMDB does not know is looked up on TheTVDB by name and year only; if that finds nothing the file keeps its name and is reported as not renamed, never given another show's.
+**Shows follow the same rule, for the rename as well.** A series is identified before its episodes are renamed, and FileBot is handed the series by id rather than searching for it, so it cannot land on a similarly named show. When more than one series shares the exact title the file is left unrenamed, reported `PARTIAL` with its candidates, and `--pick` resolves it. A show TMDB does not know is looked up on TheTVDB by name and year only, then on TVmaze, each held to the series name; if neither finds it the episode is named from its own file ([below](#titles-no-database-knows)), never given another show's name.
 
 **Shows follow the same rule.** The series is identified by an **exact title match, ignoring the year** — a renewed show's filename carries the year *that season* aired, not the year it debuted, so a year-strict lookup would find nothing for it. One match is used; more than one is never guessed between: the file is left as it is and the candidates are listed (with the language each was made in and its origin country) for `--pick`. The same pick settles the show's language, metadata and poster together.
 
@@ -285,6 +286,46 @@ python MediaCleanup.py --cleantags --no-fetch-tags --input "D:\Media\Fixed"
 > Note: Plex/Jellyfin scrape their own metadata and mostly ignore embedded tags. The payoff is in VLC/MPC-HC/Kodi and archival self-containment — the file carries its metadata forever, independent of any server.
 
 ---
+
+## Titles no database knows
+
+A rename starts by **identifying** the title. The sources are tried in order, and a source is passed over only when it found **nothing**:
+
+| | 1st | 2nd | 3rd |
+|---|---|---|---|
+| **Films** | TMDB | OMDb (needs `omdb_api_key`) | — |
+| **Shows** | TheTVDB and TMDB | TVmaze (no key) | — |
+
+Four rules hold throughout:
+
+1. **Several matches stop the chain.** If TMDB finds three films with the exact title, OMDb is not asked: the file is left alone and the candidates are numbered for `--pick`, because another database would only add more guesses.
+2. **Every hit is verified.** The title must match exactly or as a whole-word prefix; for films the year must be within one; for shows the series name must match. A near miss counts as "nothing found".
+3. **A database that cannot be reached is not "nothing found".** A network outage, a bad key or a rate limit leaves the file untouched; it never leads to anything being renamed.
+4. **The source is named in the log**, e.g. `Identified 'The Film' (2023) as The Film (2023) — tt1234567, via OMDb (TMDB has no match)`.
+
+A film OMDb identifies is renamed with this script's own name template — `Title (Year) - ttNNNNNNN - Source.Resolution.Codec - [Languages]` — rather than through FileBot, so it works without FileBot reaching OMDb. Its tags come from OMDb's record of that id (genre, director, cast, plot, rating): thinner than TMDB's, but the film itself.
+
+### When every source finds nothing
+
+The file is still named and its tags cleaned, **from facts that are in the file**:
+
+```
+movie.2023.Web.x264.mkv   ->   Movie (2023) - WebRip.1080p.x264 - [Hindi + English].mkv
+show.name.s01e02.web.x264.mkv   ->   Show Name - S01E02 - 1080p.x264 - [English].mkv
+```
+
+- The **title and year** are the ones the filename states (a title written in all lower case is capitalised; one with any capital is left as written). The **resolution, codec and audio languages** are read from the video and its tracks, and the source tag (`WEB-DL`, `BluRay`…) from the filename.
+- **Nothing is invented.** No IMDB id, no poster, no synopsis, no cast. The cover art already in the file is kept.
+- The result is reported **`LOCAL`** in the summary, separate from `OK`, and every such rename is appended to `logs\local_named.csv` (old path, new path, why) so a name no database confirmed can always be told from one that was.
+- It carries no id, so a later run renames it normally if a database learns the title.
+
+It applies only to "found nothing". It never applies to a title with **several** possible matches (that is a choice for you, via `--pick`), and never when no database could be reached. A film needs a plausible year in its filename and an episode needs a season and episode number; without them the file is left as it is and the reason is shown.
+
+`--no-local-name` (or `[naming] local_fallback = false`) turns it off, restoring "leave it as it is".
+
+**Previews.** `--dry-run` shows the `LOCAL` name for a film. For a show TMDB does not know, a dry run cannot tell whether TheTVDB or TVmaze would find it (that needs FileBot's own search; `--preview-exact` asks it), so it states what happens if neither does.
+
+**Scope.** The fallback belongs to the processing modes (`--movies`, `--tv`), `--cleantags` and `--cleanmetadata`. `--rename` uses the same sources, so it can rename a film only OMDb lists, but it never names a file from the file alone. TV episodes are named through FileBot, so that path needs FileBot to be installed.
 
 ## Renaming messy filenames
 

@@ -608,6 +608,9 @@ class Config:
     LANG_CANONICAL_ORDER: Tuple[str, ...] = _DEFAULT_TARGETS
     # Identify tracks tagged 'und' — [languages] detect_undetermined.
     DETECT_UNDETERMINED_LANGS: bool = True
+    # When no database knows a title, name and tag the file from facts in the file
+    # itself — [naming] local_fallback; --no-local-name turns it off.
+    LOCAL_NAME_FALLBACK: bool = True
     # Full display names used in the output filename bracket list and track naming.
     LANG_DISPLAY_MAP: Dict[str, str] = dataclasses.field(
         default_factory=lambda: _build_language_maps(_DEFAULT_TARGETS)[0])
@@ -725,6 +728,10 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         raise ConfigError("[languages] detect_undetermined must be true or false")
     lang_display, lang_iso_codes, lang_tokens = _build_language_maps(lang_order)
 
+    local_fallback = naming.get("local_fallback", True)
+    if not isinstance(local_fallback, bool):
+        raise ConfigError("[naming] local_fallback must be true or false")
+
     def required(section: Dict[str, Any], section_name: str, key: str) -> str:
         v = section.get(key)
         if not v:
@@ -772,6 +779,7 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         STRIP_PREFIXES=strip_prefixes,
         LANG_CANONICAL_ORDER=lang_order,
         DETECT_UNDETERMINED_LANGS=detect_und,
+        LOCAL_NAME_FALLBACK=local_fallback,
         LANG_DISPLAY_MAP=lang_display,
         LANG_ISO_CODES=lang_iso_codes,
         LANG_NAME_TOKENS=lang_tokens,
@@ -925,6 +933,9 @@ def print_results_table(title: str, results: List[Result]) -> None:
             # The file was tagged and cleaned, but it still carries its release
             # name — reporting a bare OK hid that from the summary entirely.
             status = "[yellow]PARTIAL[/yellow]"
+        elif r.ok and r.details.get("local_named"):
+            # Named and cleaned from the file alone: no database confirmed it.
+            status = "[cyan]LOCAL[/cyan]"
         elif r.ok and r.reason in _SKIP_REASONS:
             status = "[yellow]SKIP[/yellow]"
         elif r.ok:
@@ -936,6 +947,8 @@ def print_results_table(title: str, results: List[Result]) -> None:
             detail = r.reason
         elif r.details.get("rename_failed"):
             detail = f"not renamed: {r.details['rename_failed']}"
+        elif r.details.get("local_named"):
+            detail = f"from the file alone -> {r.details['local_named']}"
         elif r.details.get("predicted"):
             detail = f"-> {r.details['predicted']}"
         elif r.kind == "rename" and (r.details.get("new") or r.details.get("proposed")):
@@ -1569,7 +1582,7 @@ def load_pick_selection(numbers: List[int]) -> Tuple[Dict[str, str], List[str]]:
     return selection, problems
 
 
-_MOVIE_IMDB_CACHE: Dict[str, Tuple[Optional[str], List[Tuple[str, str]]]] = {}
+_MOVIE_IMDB_CACHE: Dict[str, Tuple[Optional[str], List[Dict[str, Any]], bool]] = {}
 _MOVIE_IMDB_LOCK = threading.Lock()
 
 
@@ -1612,7 +1625,7 @@ def _title_prefix_matches(candidate: str, query: str) -> bool:
 
 
 def resolve_movie_imdb_id(title: str, year: Optional[str]
-                           ) -> Tuple[Optional[str], List[Tuple[str, str]]]:
+                           ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     """
     Resolve a film to one IMDB id, or report why it could not be.
 
@@ -1620,21 +1633,38 @@ def resolve_movie_imdb_id(title: str, year: Optional[str]
     survives; otherwise it is None and candidates lists what remained, so the
     caller can show the user what to choose between instead of guessing.
     """
+    imdb_id, candidates, _answered = _resolve_movie_tmdb(title, year)
+    return imdb_id, candidates
+
+
+def _resolve_movie_tmdb(title: str, year: Optional[str]
+                        ) -> Tuple[Optional[str], List[Dict[str, Any]], bool]:
+    """
+    TMDB step of the film chain: (imdb_id, candidates, answered).
+
+    'answered' is False when TMDB could not be asked at all (no key, no network).
+    Nothing found and nothing asked look the same in (None, []), but only the
+    first is evidence that the title is absent — the second must not be treated
+    as permission to fall back to anything.
+    """
     if not CFG.TMDB_API_KEY or not title:
-        return None, []
+        return None, [], False
     key = f"{title.strip().lower()}|{year or ''}"
     with _MOVIE_IMDB_LOCK:
         if key in _MOVIE_IMDB_CACHE:
             return _MOVIE_IMDB_CACHE[key]
 
     imdb_id: Optional[str] = None
-    candidates: List[Tuple[str, str]] = []
+    candidates: List[Dict[str, Any]] = []
+    answered = False
     try:
         url = (f"https://api.themoviedb.org/3/search/movie?api_key={CFG.TMDB_API_KEY}"
                f"&query={urllib.parse.quote(title)}")
         if year:
             url += f"&year={year}"
-        results = (_http_get_json(url) or {}).get("results") or []
+        reply = _http_get_json(url)
+        answered = reply is not None
+        results = (reply or {}).get("results") or []
 
         # Year first: it is a hard constraint, not a ranking hint.
         if year and str(year).isdigit():
@@ -1687,9 +1717,11 @@ def resolve_movie_imdb_id(title: str, year: Optional[str]
     except Exception as e:
         logging.debug("Movie identity lookup failed for %r (%s): %s", title, year, e)
 
-    with _MOVIE_IMDB_LOCK:
-        _MOVIE_IMDB_CACHE[key] = (imdb_id, candidates)
-    return imdb_id, candidates
+    # A failed lookup is not cached: the next file in the run may reach TMDB.
+    if answered:
+        with _MOVIE_IMDB_LOCK:
+            _MOVIE_IMDB_CACHE[key] = (imdb_id, candidates, answered)
+    return imdb_id, candidates, answered
 
 
 def file_audio_languages(mkv: Path) -> Set[str]:
@@ -1749,30 +1781,143 @@ def _report_movie_candidates(src: Path, title: str, year: Optional[str],
     return numbers
 
 
-def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
-                              known_imdb: Optional[str],
-                              own_langs: Optional[Set[str]] = None) -> Tuple[Optional[str], str]:
-    """
-    The IMDB id to pin this film's rename to, or a reason it cannot be renamed.
+# OMDb's free tier allows about a thousand requests a day, and one film can be
+# identified several times in a run (rename, tags, cover art), so answers are kept.
+_OMDB_SEARCH_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_OMDB_SEARCH_LOCK = threading.Lock()
 
-    An id already carried by the filename, folder or tags is trusted as-is —
-    it costs nothing and is exactly what a previous run established.
+
+def _omdb_search_movies(title: str, year: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """
+    Films OMDb lists under a title, or None when OMDb could not be asked.
+
+    OMDb's year filter is exact, so a release-date drift of one year (the same
+    tolerance the TMDB step allows) takes three small queries instead of one.
+    """
+    if not CFG.OMDB_API_KEY or not title:
+        return None
+    key = f"{title.strip().lower()}|{year or ''}"
+    with _OMDB_SEARCH_LOCK:
+        if key in _OMDB_SEARCH_CACHE:
+            return _OMDB_SEARCH_CACHE[key]
+    years: List[Optional[str]] = [None]
+    if year and str(year).isdigit():
+        years = [str(int(year) + d) for d in (0, -1, 1)]
+    found: Dict[str, Dict[str, Any]] = {}
+    answered = False
+    for y in years:
+        url = (f"https://www.omdbapi.com/?s={urllib.parse.quote(title)}&type=movie"
+               f"&apikey={CFG.OMDB_API_KEY}" + (f"&y={y}" if y else ""))
+        reply = _http_get_json(url)
+        if reply is None:
+            continue
+        answered = True
+        for r in reply.get("Search") or []:
+            tt = str(r.get("imdbID") or "")
+            if re.fullmatch(r"tt\d{7,10}", tt):
+                found[tt] = r
+    if not answered:
+        return None        # not cached: the next film may reach OMDb
+    result = list(found.values())
+    with _OMDB_SEARCH_LOCK:
+        _OMDB_SEARCH_CACHE[key] = result
+    return result
+
+
+def _resolve_movie_omdb(title: str, year: Optional[str]
+                        ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], bool]:
+    """
+    OMDb step of the film chain: (film, candidates, answered).
+
+    Held to the same standard as the TMDB step: the year must be within one, and
+    exactly one film must carry the title — exactly, or as a whole-word prefix.
+    'film' carries OMDb's own title and year, which the rename then uses.
+    """
+    rows = _omdb_search_movies(title, year)
+    if rows is None:
+        return None, [], False
+    if year and str(year).isdigit():
+        want = int(year)
+        rows = [r for r in rows
+                if str(r.get("Year") or "")[:4].isdigit()
+                and abs(int(str(r["Year"])[:4]) - want) <= 1]
+    exact = [r for r in rows if _match_key(r.get("Title")) == _match_key(title)]
+    prefix = [r for r in rows if _title_prefix_matches(str(r.get("Title") or ""), title)]
+    if len(exact) == 1:
+        return exact[0], [], True
+    if not exact and len(prefix) == 1:
+        return prefix[0], [], True
+    pool = exact if len(exact) > 1 else prefix
+    candidates = [{
+        "title": str(r.get("Title") or "?"),
+        "year": str(r.get("Year") or "")[:4],
+        "imdb": str(r["imdbID"]),
+        "id": str(r["imdbID"]),
+        "tmdb": None,
+        "lang": None,
+        "original_title": "",
+        "overview": "",
+    } for r in pool[:5]]
+    return None, candidates, True
+
+
+@dataclasses.dataclass
+class MovieIdentity:
+    """
+    The outcome of identifying a film.
+
+    status: 'found' (imdb is set), 'ambiguous' (several films fit — a person must
+    choose), 'none' (every source that could be asked found nothing) or
+    'unavailable' (no source could be asked at all). Only 'none' may lead to a
+    name built from the file alone; the others leave the file as it is.
+    """
+    imdb: Optional[str] = None
+    source: str = ""          # TMDB | OMDb | file | pick | command line
+    status: str = "none"
+    reason: str = ""
+    title: Optional[str] = None   # the database's own title (OMDb results only)
+    year: Optional[str] = None
+
+
+def movie_identity_chain(src: Path, title: str, year: Optional[str],
+                         known_imdb: Optional[str],
+                         own_langs: Optional[Set[str]] = None) -> MovieIdentity:
+    """
+    Identify a film through the source chain: TMDB, then OMDb.
+
+    A source is passed over only when it found NOTHING. If it found several films
+    the chain stops there and asks — another database would only add more
+    guesses. An id already carried by the filename, folder or tags is trusted
+    as-is: it costs nothing and is exactly what a previous run established.
     """
     if _IMDB_OVERRIDE:
         logging.info("Using the IMDB id given on the command line for %s: %s",
                      src.name, _IMDB_OVERRIDE)
-        return _IMDB_OVERRIDE, ""
+        return MovieIdentity(imdb=_IMDB_OVERRIDE, source="command line", status="found")
     picked = _PICK_SELECTION.get(_pending_key("movie", title, year))
     if picked:
         logging.info("Using your pick for %s: %s", src.name, picked)
-        return picked, ""
+        return MovieIdentity(imdb=picked, source="pick", status="found")
     if known_imdb and re.fullmatch(r"tt\d{7,10}", known_imdb):
         logging.debug("Using IMDB id from the file itself: %s", known_imdb)
-        return known_imdb, ""
+        return MovieIdentity(imdb=known_imdb, source="file", status="found")
 
-    imdb_id, candidates = resolve_movie_imdb_id(title, year)
-    if imdb_id:
-        return imdb_id, ""
+    tmdb_imdb, candidates, tmdb_answered = _resolve_movie_tmdb(title, year)
+    if tmdb_imdb:
+        return MovieIdentity(imdb=tmdb_imdb, source="TMDB", status="found")
+
+    sources = ["TMDB"] if tmdb_answered else []
+    if not candidates:
+        film, candidates, omdb_answered = _resolve_movie_omdb(title, year)
+        if omdb_answered:
+            sources.append("OMDb")
+        if film:
+            logging.info("Identified %r (%s) as %s (%s) — %s, via OMDb (TMDB has no match)",
+                         title, year or "no year", film.get("Title"), film.get("Year"),
+                         film.get("imdbID"))
+            return MovieIdentity(imdb=str(film["imdbID"]), source="OMDb", status="found",
+                                 title=str(film.get("Title") or "") or None,
+                                 year=str(film.get("Year") or "")[:4] or None)
 
     if candidates:
         langs = own_langs if own_langs is not None else file_audio_languages(src)
@@ -1787,11 +1932,26 @@ def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
             f"[{n}] {c['title']} ({c['year']})"
             + (f" {language_display(c['lang'])}" if c.get("lang") else "")
             for n, c in list(zip(numbers, candidates))[:4])
-        return None, f"pick one — {listed}"
+        return MovieIdentity(status="ambiguous", reason=f"pick one — {listed}")
 
-    logging.warning("Cannot identify %s: nothing matches %r (%s).",
-                    src.name, title, year or "no year")
-    return None, f"no film matches {title!r} ({year or 'no year'})"
+    if not sources:
+        why = "no database could be reached (check the API keys and the network)"
+        logging.warning("Cannot identify %s: %s.", src.name, why)
+        return MovieIdentity(status="unavailable", reason=why)
+
+    tried = " and ".join(sources)
+    logging.warning("Cannot identify %s: nothing matches %r (%s) on %s.",
+                    src.name, title, year or "no year", tried)
+    return MovieIdentity(status="none",
+                         reason=f"no film matches {title!r} ({year or 'no year'}) on {tried}")
+
+
+def movie_identity_for_rename(src: Path, title: str, year: Optional[str],
+                              known_imdb: Optional[str],
+                              own_langs: Optional[Set[str]] = None) -> Tuple[Optional[str], str]:
+    """The IMDB id to pin this film's rename to, or a reason it cannot be renamed."""
+    ident = movie_identity_chain(src, title, year, known_imdb, own_langs)
+    return ident.imdb, ("" if ident.imdb else ident.reason)
 
 
 def _filebot_series_name_filter(year_filter: List[str], show: str, db: str) -> List[str]:
@@ -1809,7 +1969,7 @@ def _filebot_series_name_filter(year_filter: List[str], show: str, db: str) -> L
     'Some Show (US)'), so a trailing parenthetical is stripped before
     comparing. TV only — this is about series identity.
     """
-    if db != "TheTVDB":
+    if db not in ("TheTVDB", "TVmaze"):
         return year_filter
     want = _normalise_for_match(re.sub(r"\s*\([^)]*\)\s*$", "", show or ""))
     if not want:
@@ -1837,6 +1997,22 @@ def _filebot_skipped_as_already_correct(out_txt: str) -> bool:
     return os.path.normcase(m.group(1).strip()) == os.path.normcase(m.group(2).strip())
 
 
+def _filebot_unreachable(*texts: str) -> bool:
+    """
+    True when FileBot's output says it could not reach a database at all.
+
+    'Found nothing' and 'could not ask' both end in a failed lookup, but only the
+    first is evidence that a title is absent. Treating a network outage as
+    absence would hand every file in the run a name built from itself.
+    """
+    blob = "\n".join(t or "" for t in texts)
+    return bool(re.search(
+        r"(?i)unknownhost|connectexception|connect(?:ion)? (?:refused|timed out|reset)|"
+        r"unable to establish|socketexception|sockettimeout|sslhandshake|no route to host|"
+        r"network is unreachable|http(?:s)? (?:response )?code:? ?(?:5\d\d|429)|"
+        r"server returned http response code: (?:5\d\d|429)", blob))
+
+
 def _filebot_failure_reason(out_txt: str, err_txt: str, rc: Optional[int], db: str) -> str:
     """Condense FileBot's output into one line fit for the summary table."""
     blob = "\n".join((out_txt or "", err_txt or ""))
@@ -1853,9 +2029,11 @@ def _filebot_failure_reason(out_txt: str, err_txt: str, rc: Optional[int], db: s
 
 
 def _with_rename_outcome(details: Dict[str, Any], outcome: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach a failed rename's reason to a task's details, if one happened."""
+    """Attach a failed rename's reason — or a name built from the file alone — to a task's details."""
     if outcome.get("ok") is False:
         details = {**details, "rename_failed": outcome.get("reason") or "rename failed"}
+    elif outcome.get("local"):
+        details = {**details, "local_named": outcome.get("local_name") or "yes"}
     return details
 
 
@@ -2007,8 +2185,31 @@ def run_filebot_rename_final_mkv(
                              query, " (year-constrained)" if year_filter else "", mkv.name)
                 r = run_cmd(base_cmd + year_filter, timeout_sec=1200)
 
+    # Third source for a series: TVmaze, held to the same series-name check as
+    # TheTVDB. Only when the earlier sources found nothing — not when they could
+    # not be reached.
+    if (not r.ok and not pinned and is_tv_db and search_q and mkv.exists()
+            and not _filebot_unreachable(r.out, r.err)):
+        logging.info("TheTVDB and TMDB could not identify %s — trying TVmaze: %s",
+                     search_q, mkv.name)
+        tvmaze_cmd = ([("TVmaze" if a == "TheTVDB" else a) for a in base_cmd]
+                      + ["--q", search_q]
+                      + _filebot_series_name_filter(year_filter, search_q, "TVmaze"))
+        r = run_cmd(tvmaze_cmd, timeout_sec=1200)
+
     out_txt = (r.out or "").strip()
     err_txt = (r.err or "").strip()
+
+    if (not r.ok and not pinned and is_tv_db and CFG.LOCAL_NAME_FALLBACK and mkv.exists()
+            and not _filebot_skipped_as_already_correct(out_txt)
+            and not _filebot_unreachable(out_txt, err_txt)
+            and "lookup failed" in _filebot_failure_reason(out_txt, err_txt, r.rc, db)):
+        # Every source found nothing: name the episode from its own file.
+        local = rename_tv_from_file(
+            mkv, f"no database knows {search_q!r} (TheTVDB, TMDB, TVmaze)",
+            outcome if outcome is not None else {})
+        if local is not None:
+            return local
 
     if not r.ok:
         logging.warning("FileBot rename failed (db=%s, rc=%s).", db, r.rc)
@@ -4043,14 +4244,22 @@ def clean_mkv_tags(mkv_path: Path, dry_run: bool, is_tv: bool = False) -> Result
         # dry runs stay offline.
         rich_xml_text: Optional[str] = None
         rich: Optional[Dict[str, Any]] = None
-        if not dry_run and _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY:
+        if not dry_run and _FETCH_TAGS_ENABLED and (CFG.TMDB_API_KEY or CFG.OMDB_API_KEY):
             try:
                 if is_tv:
                     s_num = int(season_str[1:]) if season_str else None
                     e_num = int(ep_str[1:]) if ep_str else None
                     rich = _get_meta_fetcher().episode_metadata(show_name, imdb_id, s_num, e_num)
                 else:
-                    rich = _get_meta_fetcher().movie_metadata(title, year, imdb_id)
+                    if not imdb_id:
+                        # No id on the file yet. A film is tagged only once it is one
+                        # verified film — never with whatever a title search ranks
+                        # first, which for an unidentified (or LOCAL) film would be
+                        # another film's cast and synopsis.
+                        imdb_id, _cands = resolve_movie_imdb_id(title, year)
+                    rich = (_get_meta_fetcher().movie_metadata(title, year, imdb_id,
+                                                               allow_title_search=False)
+                            if imdb_id else None)
                 if rich:
                     rich_xml_text = _build_rich_tags_xml(rich, is_tv=is_tv, imdb_id=imdb_id)
                     logging.info("Tags enriched: %s | genre=%s | director=%s | actors=%d",
@@ -4242,6 +4451,7 @@ def _cleantags_one(
     # as cover art must not then guess by title: the poster of whichever film the
     # database happened to rank first is as wrong as a wrong rename would be.
     identified = True
+    outcome: Dict[str, Any] = {}     # what the rename step did (see _with_rename_outcome)
 
     if not skip_filebot and not dry_run:
         # Extract clean title and IMDB so we can use them whether FileBot runs or not
@@ -4261,26 +4471,32 @@ def _cleantags_one(
             db    = CFG.FILEBOT_DB
             fmt   = MOVIE_FILEBOT_FORMAT
 
-        # A film must be pinned to one IMDB id before it may be renamed; several
-        # releases can share a title and a year, and the wrong pick rewrites tags.
-        pinned_imdb: Optional[str] = None
-        blocked_reason = ""
-        if not is_tv:
-            pinned_imdb, blocked_reason = movie_identity_for_rename(
-                mkv_path, title or mkv_path.stem, year, imdb_id)
-
         filebot_ok = False
-        if not is_tv and not pinned_imdb:
-            logging.warning("cleantags: leaving %s unrenamed — %s", mkv_path.name, blocked_reason)
-            identified = False
-        elif CFG.FILEBOT_EXE.exists() and not _FILEBOT_DISABLED:
-            logging.info("cleantags FileBot rename: %s  (query=%s)", mkv_path.name, query)
-            fb = run_filebot_rename_final_mkv(mkv_path, db=db, filebot_format=fmt,
-                                              dry_run=False, query=query, imdb_id=pinned_imdb)
+        if is_tv:
+            if CFG.FILEBOT_EXE.exists() and not _FILEBOT_DISABLED:
+                logging.info("cleantags FileBot rename: %s  (query=%s)", mkv_path.name, query)
+                fb = run_filebot_rename_final_mkv(mkv_path, db=db, filebot_format=fmt,
+                                                  dry_run=False, query=query, outcome=outcome)
+                if fb and fb.exists() and fb != mkv_path:
+                    logging.info("cleantags FileBot renamed -> %s", fb.name)
+                    current    = fb
+                    filebot_ok = True
+        else:
+            # A film must be pinned to one IMDB id before it may be renamed; several
+            # releases can share a title and a year, and the wrong pick rewrites
+            # tags. One that no database knows is named from its own file instead.
+            ident = movie_identity_chain(mkv_path, title or mkv_path.stem, year, imdb_id)
+            identified = bool(ident.imdb)
+            logging.info("cleantags rename: %s  (query=%s)", mkv_path.name, query)
+            fb = rename_movie_when_identified(mkv_path, query, title or mkv_path.stem, year,
+                                              imdb_id, outcome, ident=ident)
             if fb and fb.exists() and fb != mkv_path:
-                logging.info("cleantags FileBot renamed -> %s", fb.name)
+                logging.info("cleantags renamed -> %s", fb.name)
                 current    = fb
                 filebot_ok = True
+            elif not ident.imdb and not outcome.get("local"):
+                logging.warning("cleantags: leaving %s unrenamed — %s", mkv_path.name,
+                                outcome.get("reason") or ident.reason)
 
         if not filebot_ok and not is_tv and imdb_id:
             # FileBot unavailable or failed — insert the IMDB ID into the filename directly
@@ -4303,13 +4519,28 @@ def _cleantags_one(
             p_title, p_year = infer_movie_name_year_from_path(mkv_path)
         if not p_imdb:
             p_imdb = extract_imdb_id_from_movie_path(mkv_path) or extract_imdb_from_mkv_tags(mkv_path)
-        pinned, why = movie_identity_for_rename(mkv_path, p_title or mkv_path.stem, p_year, p_imdb)
-        if not pinned:
-            logging.warning("[DRY] cleantags would leave %s unrenamed — %s", mkv_path.name, why)
+        ident = movie_identity_chain(mkv_path, p_title or mkv_path.stem, p_year, p_imdb)
+        if not ident.imdb:
             identified = False
+            local_name = ""
+            if ident.status == "none" and CFG.LOCAL_NAME_FALLBACK:
+                local_name, problem = local_movie_name(mkv_path, p_title or mkv_path.stem, p_year)
+                if local_name:
+                    outcome["local"], outcome["local_name"] = True, local_name
+                    logging.info("[DRY] cleantags: no database knows %s — would name it from the "
+                                 "file alone (LOCAL): %s", mkv_path.name, local_name)
+                else:
+                    logging.warning("[DRY] cleantags would leave %s unrenamed — %s; %s",
+                                    mkv_path.name, ident.reason, problem)
+            else:
+                logging.warning("[DRY] cleantags would leave %s unrenamed — %s",
+                                mkv_path.name, ident.reason)
 
+    details: Dict[str, Any] = {"is_tv": is_tv, "identified": identified}
+    if outcome.get("local"):
+        details["local_named"] = outcome.get("local_name") or "yes"
     return Result(kind=kind, source_items=[mkv_path], output_path=current, ok=True,
-                  details={"is_tv": is_tv, "identified": identified})
+                  details=details)
 
 
 def run_cleantags_pipeline(
@@ -4912,20 +5143,72 @@ class MetadataFetcher:
 
     # ---------- movies ----------
 
-    def movie_metadata(self, title: Optional[str], year: Optional[str],
-                       imdb_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not CFG.TMDB_API_KEY:
+    @staticmethod
+    def _omdb_movie_metadata(imdb_id: str, title: Optional[str],
+                             year: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        Tags for a film TMDB does not carry, from OMDb's record of its IMDB id.
+
+        Thinner than TMDB's (no collection, no original language), and only ever
+        asked for by id: what OMDb returns here is the film itself, not a guess.
+        """
+        rec = _omdb_movie_by_id(imdb_id)
+        if not rec:
             return None
-        cache_key = f"movie:{(imdb_id or f'{title}|{year}' or '').lower()}"
+
+        def listed(key: str) -> List[str]:
+            return [x.strip() for x in str(rec.get(key) or "").split(",")
+                    if x.strip() and x.strip() != "N/A"]
+
+        def value(key: str) -> Optional[str]:
+            v = str(rec.get(key) or "").strip()
+            return None if v in ("", "N/A") else v
+
+        plot = value("Plot") or ""
+        return {
+            "title": rec.get("Title") or title,
+            "year": str(rec.get("Year") or "")[:4] or year,
+            "date": None,
+            "genres": listed("Genre"),
+            "directors": listed("Director")[:5],
+            "writers": listed("Writer")[:5],
+            "cast": [(n, "") for n in listed("Actors")[:10]],
+            "description": (plot[:250] + "…" if len(plot) > 250 else plot) or None,
+            "synopsis": plot or None,
+            "law_rating": value("Rated"),
+            "rating": value("imdbRating"),
+            "collection": None,
+            "orig_lang": None,
+            "imdb_id": imdb_id,
+            "tmdb_id": None,
+        }
+
+    def movie_metadata(self, title: Optional[str], year: Optional[str],
+                       imdb_id: Optional[str],
+                       allow_title_search: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Rich metadata for a film.
+
+        With an id, the film is looked up by it — on TMDB, then on OMDb — and
+        never by title: if no database carries the id, there is no metadata,
+        because a title search could only return a different film.
+        allow_title_search=False refuses the title search when there is no id too,
+        for callers that must not tag a film they could not identify.
+        """
+        if not CFG.TMDB_API_KEY and not (CFG.OMDB_API_KEY and imdb_id):
+            return None
+        cache_key = (f"movie:{(imdb_id or f'{title}|{year}' or '').lower()}"
+                     + ("" if allow_title_search else ":id"))
 
         def fetch() -> Optional[Dict[str, Any]]:
             tmdb_id: Optional[int] = None
-            if imdb_id:
-                tmdb_id, _tv = self._tmdb_ids_for_imdb(imdb_id)
-            if tmdb_id is None and title:
-                tmdb_id = self._tmdb_search_id(title, year, is_tv=False)
+            if CFG.TMDB_API_KEY:
+                if imdb_id:
+                    tmdb_id, _tv = self._tmdb_ids_for_imdb(imdb_id)
+                elif title and allow_title_search:
+                    tmdb_id = self._tmdb_search_id(title, year, is_tv=False)
             if tmdb_id is None:
-                return None
+                return self._omdb_movie_metadata(imdb_id, title, year) if imdb_id else None
 
             data = _http_get_json(
                 f"https://api.themoviedb.org/3/movie/{tmdb_id}"
@@ -5638,6 +5921,39 @@ def run_rename_undo() -> int:
     return 0 if skipped == 0 else 1
 
 
+def _rename_one_via_omdb(mkv: Path, ident: MovieIdentity, title: str, year: Optional[str],
+                         target_root: Optional[Path], dry_run: bool) -> Result:
+    """--rename for a film that only OMDb identified: the script's own template, no FileBot."""
+    kind = "rename"
+    facts = _local_file_facts(mkv)
+    if not facts:
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                      reason="could not read the file's video")
+    name_title = ident.title or title
+    name_year = ident.year or year
+    dest_dir = mkv.parent
+    if target_root:
+        folder = sanitize_filename(f"{name_title} ({name_year})" if name_year else name_title)
+        dest_dir = target_root / folder
+    dest = dest_dir / build_movie_output_name(name_title, name_year, ident.imdb, facts["res"],
+                                              facts["source"], facts["codec"], [],
+                                              bracket=facts["bracket"])
+    if dry_run:
+        logging.info("[DRY] %s -> %s (identified via OMDb)", mkv.name, dest)
+        return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True,
+                      reason="dry-run", details={"proposed": str(dest)})
+    outcome: Dict[str, Any] = {}
+    new = rename_movie_from_omdb(mkv, ident.imdb or "", ident.title, ident.year, title, year,
+                                 outcome, dest_dir=dest_dir)
+    if new is None:
+        return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
+                      reason=outcome.get("reason") or "rename failed")
+    if new == mkv:
+        return Result(kind=kind, source_items=[mkv], output_path=mkv, ok=True, reason="already_named")
+    return Result(kind=kind, source_items=[mkv], output_path=new, ok=True,
+                  details={"old": str(mkv), "new": str(new)})
+
+
 def process_rename_one(
     mkv: Path,
     is_tv: bool,
@@ -5703,10 +6019,14 @@ def process_rename_one(
                 _imdb = extract_imdb_id_from_movie_path(mkv) or extract_imdb_from_mkv_tags(mkv)
             # A film must be pinned to one id before it may be renamed — a title
             # and a year are shared by too many releases to identify one.
-            pinned_imdb, blocked = movie_identity_for_rename(mkv, title or mkv.stem, year, _imdb)
-            if not pinned_imdb:
+            ident = movie_identity_chain(mkv, title or mkv.stem, year, _imdb)
+            if not ident.imdb:
                 return Result(kind=kind, source_items=[mkv], output_path=None, ok=False,
-                              reason=blocked)
+                              reason=ident.reason)
+            pinned_imdb = ident.imdb
+            if ident.source == "OMDb":
+                return _rename_one_via_omdb(mkv, ident, title or mkv.stem, year,
+                                            target_root, dry_run)
 
         out_dir = target_root if target_root else mkv.parent
         action = "test" if dry_run else "move"
@@ -6372,6 +6692,7 @@ def build_movie_output_name(
     source_tag: Optional[str],
     codec_tag: str,
     audio_langs: List[str],
+    bracket: Optional[str] = None,
 ) -> str:
     """
     Movies naming (requested):
@@ -6379,11 +6700,15 @@ def build_movie_output_name(
 
     Example:
       The Film (2026) - tt1234567 - HDRip.1080p.x265 - [Telugu + Hindi].mkv
+
+    'bracket' overrides the language list when the caller has already worked out
+    what the file really carries (a name built from the file alone must not say
+    'NoAudioMatch' about a language that merely is not a configured target).
     """
     base = sanitize_filename(movie_name)
     title = f"{base} ({year})" if year else base
 
-    bracket = build_audio_bracket(audio_langs)
+    bracket = bracket or build_audio_bracket(audio_langs)
 
     # Rip (source) is first; fall back to WebRip if unknown/missing
     rip = sanitize_filename(source_tag) if source_tag else "WebRip"
@@ -6445,7 +6770,7 @@ def predict_movie_final_name(sample: Path, title: str, year: Optional[str], imdb
             return name
     # Database prediction: the canonical title and IMDB id are the parts the
     # rename adds; resolution/codec/source/languages we already computed.
-    if _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY:
+    if _FETCH_TAGS_ENABLED and CFG.TMDB_API_KEY and imdb_id:
         try:
             meta = _get_meta_fetcher().movie_metadata(title, year, imdb_id)
             if meta:
@@ -6991,9 +7316,219 @@ def run_mp4tomkv_pipeline(
 
     return results
 
+# --- Names built from the file alone ----------------------------------------
+# When every database that could be asked found nothing, the file is still named
+# and tagged — but only from facts that are in the file: the title and year its
+# own filename states, and the resolution, codec and audio languages read from
+# the video and its tracks. No id, no poster, no synopsis, no cast is invented,
+# and the result is reported as LOCAL and written to a ledger so a name that no
+# database confirmed can always be told apart from one that was.
+
+LOCAL_NAMED_CSV = _SCRIPT_DIR / "logs" / "local_named.csv"
+_LOCAL_LEDGER_LOCK = threading.Lock()
+_LOWER_WORDS = frozenset("a an and as at but by for from in of on or the to with".split())
+
+
+def _tidy_title(title: str) -> str:
+    """
+    Capitalise a title written entirely in lower case ('some film' -> 'Some Film').
+
+    A title that already has any capital letter is left exactly as written: that
+    is information (an acronym, a stylised name) the script cannot reconstruct.
+    """
+    t = (title or "").strip()
+    if not t or t != t.lower():
+        return t
+    return " ".join(w if (i and w in _LOWER_WORDS) else w[:1].upper() + w[1:]
+                    for i, w in enumerate(t.split(" ")))
+
+
+def _local_title_usable(title: Optional[str], year: Optional[str], *, need_year: bool) -> bool:
+    """A name built from the file needs a real title, and for a film a plausible year."""
+    t = (title or "").strip()
+    if not t or not re.search(r"[^\W_]", t) or t.lower() == "unknownshow":
+        return False
+    if need_year:
+        if not (year and str(year).isdigit()):
+            return False
+        return 1888 <= int(year) <= _dt.date.today().year + 1
+    return True
+
+
+def _local_audio_bracket(tracks: List[Track]) -> str:
+    """
+    The languages a file's audio really carries, configured targets first.
+
+    Unlike build_audio_bracket this does not drop a language just because it is
+    not a configured target: the name describes the file, it does not select.
+    """
+    found: List[str] = []
+    for t in tracks:
+        if t.type != "audio" or is_excluded_audio(t):
+            continue
+        raw = (t.language or "und").lower()
+        canon = resolve_language(raw) if raw != "und" else detect_language_canonical(t)
+        if canon and canon not in found:
+            found.append(canon)
+    order = {c: i for i, c in enumerate(CFG.LANG_CANONICAL_ORDER)}
+    found.sort(key=lambda c: order.get(c, len(order)))     # stable: file order otherwise
+    return " + ".join(language_display(c) for c in found) or "Unknown"
+
+
+def _local_file_facts(src: Path) -> Optional[Dict[str, Any]]:
+    """Resolution, codec, source and audio languages as read from the file itself."""
+    try:
+        tracks = extract_tracks(src, mkvmerge_identify_json(src))
+    except Exception as e:
+        logging.debug("Could not read %s: %s", src.name, e)
+        return None
+    video = next((t for t in tracks if t.type == "video"), None)
+    if video is None:
+        return None
+    codec = codec_tag_video(video)
+    if codec in ("unknown", "video"):
+        codec = infer_codec_tag_from_filename(src.name) or codec
+    return {
+        "res": infer_resolution_tag_from_video(video, fallback_filename=src.name),
+        "codec": codec,
+        "source": infer_source_tag_from_filename(src.name),
+        "bracket": _local_audio_bracket(tracks),
+    }
+
+
+def _local_ledger_add(kind: str, old: Path, new: Path, why: str) -> None:
+    try:
+        LOCAL_NAMED_CSV.parent.mkdir(parents=True, exist_ok=True)
+        with _LOCAL_LEDGER_LOCK:
+            fresh = not LOCAL_NAMED_CSV.exists()
+            with open(LOCAL_NAMED_CSV, "a", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                if fresh:
+                    w.writerow(["when", "kind", "old_path", "new_path", "why"])
+                w.writerow([_dt.datetime.now().isoformat(timespec="seconds"),
+                            kind, str(old), str(new), why])
+    except OSError as e:
+        logging.debug("Could not write %s: %s", LOCAL_NAMED_CSV.name, e)
+
+
+def _rename_file_to(src: Path, dest: Path, outcome: Dict[str, Any]) -> Optional[Path]:
+    """
+    Rename src to dest, refusing to overwrite. Records the result in outcome and
+    returns the file's path afterwards (src itself when it already has that name).
+    """
+    if os.path.normcase(str(dest)) == os.path.normcase(str(src)):
+        outcome["ok"], outcome["reason"] = True, ""
+        return src
+    if dest.exists():
+        outcome["ok"], outcome["reason"] = False, f"target name already in use: {dest.name}"
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dest)
+    except OSError as e:
+        outcome["ok"], outcome["reason"] = False, f"could not rename: {e}"
+        return None
+    outcome["ok"], outcome["reason"] = True, ""
+    return dest
+
+
+def _finish_local_rename(src: Path, new_name: str, kind: str, why: str,
+                         outcome: Dict[str, Any]) -> Optional[Path]:
+    """Rename a file to a name built from itself, and say so everywhere it is seen."""
+    result = _rename_file_to(src, src.with_name(new_name), outcome)
+    if result is None:
+        return None
+    outcome["local"], outcome["local_name"] = True, new_name
+    if result != src:
+        logging.info("Named from the file alone (%s): %s -> %s", why, src.name, result.name)
+        _local_ledger_add(kind, src, result, why)
+    return result
+
+
+def local_movie_name(src: Path, movie_name: str, year: Optional[str]) -> Tuple[Optional[str], str]:
+    """The name a film would get from its own file, or why it cannot get one."""
+    if not _local_title_usable(movie_name, year, need_year=True):
+        return None, "the filename gives no usable title and year"
+    facts = _local_file_facts(src)
+    if not facts or facts["res"] == "UnknownRes" or facts["codec"] in ("unknown", "video"):
+        return None, "the video's resolution or codec could not be read"
+    return build_movie_output_name(_tidy_title(movie_name), year, None, facts["res"],
+                                   facts["source"], facts["codec"], [],
+                                   bracket=facts["bracket"]), ""
+
+
+def rename_movie_from_file(src: Path, movie_name: str, year: Optional[str],
+                           why: str, outcome: Dict[str, Any]) -> Optional[Path]:
+    name, problem = local_movie_name(src, movie_name, year)
+    if not name:
+        outcome["ok"], outcome["reason"] = False, f"{why}; {problem}, so it was left as it is"
+        return None
+    return _finish_local_rename(src, name, "movie", why, outcome)
+
+
+def tv_local_name(src: Path) -> Tuple[Optional[str], str]:
+    """The name an episode would get from its own file, or why it cannot get one."""
+    show, season, ep, ep_title = infer_tv_components(src)
+    bare, _year = split_show_year(show or "")
+    if not _local_title_usable(bare, None, need_year=False):
+        return None, "the filename gives no usable show title"
+    if not (season and ep):
+        return None, "the filename gives no season and episode number"
+    facts = _local_file_facts(src)
+    if not facts or facts["res"] == "UnknownRes" or facts["codec"] in ("unknown", "video"):
+        return None, "the video's resolution or codec could not be read"
+    return build_tv_output_name(_tidy_title(show), season, ep, ep_title, facts["res"],
+                                facts["codec"], [], bracket=facts["bracket"]), ""
+
+
+def rename_tv_from_file(src: Path, why: str, outcome: Dict[str, Any]) -> Optional[Path]:
+    name, problem = tv_local_name(src)
+    if not name:
+        outcome["ok"], outcome["reason"] = False, f"{why}; {problem}, so it was left as it is"
+        return None
+    return _finish_local_rename(src, name, "tv", why, outcome)
+
+
+def _omdb_movie_by_id(imdb_id: str) -> Optional[Dict[str, Any]]:
+    """OMDb's record for an IMDB id, when it is a film."""
+    if not CFG.OMDB_API_KEY or not imdb_id:
+        return None
+    data = _http_get_json(f"https://www.omdbapi.com/?i={urllib.parse.quote(imdb_id)}"
+                          f"&apikey={CFG.OMDB_API_KEY}")
+    if data and data.get("Response") == "True" and str(data.get("Type") or "") == "movie":
+        return data
+    return None
+
+
+def rename_movie_from_omdb(src: Path, imdb_id: str, omdb_title: Optional[str],
+                           omdb_year: Optional[str], fallback_name: str,
+                           fallback_year: Optional[str], outcome: Dict[str, Any],
+                           dest_dir: Optional[Path] = None) -> Optional[Path]:
+    """
+    Rename a film that OMDb identified, using this script's own name template.
+
+    The film is already pinned to an id, so nothing here guesses. FileBot is not
+    involved: it would need its own OMDb access, and the template is the same
+    one the rest of the tool uses to name a film.
+    """
+    facts = _local_file_facts(src)
+    if not facts:
+        outcome["ok"], outcome["reason"] = False, "could not read the file's video"
+        return None
+    name = build_movie_output_name(omdb_title or fallback_name, omdb_year or fallback_year,
+                                   imdb_id, facts["res"], facts["source"], facts["codec"],
+                                   [], bracket=facts["bracket"])
+    dest = (dest_dir or src.parent) / name
+    result = _rename_file_to(src, dest, outcome)
+    if result is not None and result != src:
+        logging.info("OMDb rename: %s -> %s", src.name, result.name)
+    return result
+
+
 def rename_movie_when_identified(src_file: Path, movie_title: str, movie_name: str,
                                  year: Optional[str], imdb_id: Optional[str],
-                                 outcome: Dict[str, Any]) -> Optional[Path]:
+                                 outcome: Dict[str, Any],
+                                 ident: Optional[MovieIdentity] = None) -> Optional[Path]:
     """
     Rename a film only once it is pinned to a single IMDB id.
 
@@ -7002,16 +7537,37 @@ def rename_movie_when_identified(src_file: Path, movie_title: str, movie_name: s
     alone and the reason recorded, rather than renamed to whichever film the
     database ranked first. That rename would also overwrite the tags, and a
     later run would then trust the wrong id.
+
+    The one exception is a film that every database found nothing about. It has
+    no wrong answer to be given, so it is named from its own file (LOCAL); see
+    rename_movie_from_file. A film with SEVERAL possible matches never is.
     """
-    pinned, blocked = movie_identity_for_rename(src_file, movie_name, year, imdb_id)
-    if not pinned:
-        outcome["ok"] = False
-        outcome["reason"] = blocked
-        return None
-    return run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
-                                        filebot_format=MOVIE_FILEBOT_FORMAT,
-                                        dry_run=False, query=movie_title,
-                                        imdb_id=pinned, outcome=outcome)
+    ident = ident or movie_identity_chain(src_file, movie_name, year, imdb_id)
+    if ident.imdb and ident.source == "OMDb":
+        return rename_movie_from_omdb(src_file, ident.imdb, ident.title, ident.year,
+                                      movie_name, year, outcome)
+    if ident.imdb:
+        renamed = run_filebot_rename_final_mkv(src_file, db=CFG.FILEBOT_DB,
+                                               filebot_format=MOVIE_FILEBOT_FORMAT,
+                                               dry_run=False, query=movie_title,
+                                               imdb_id=ident.imdb, outcome=outcome)
+        if outcome.get("ok") is False:
+            # TMDB may simply not carry this id (a film chosen with --imdb or
+            # --pick that only OMDb lists). The id is still certain, so OMDb can
+            # supply the name.
+            rec = _omdb_movie_by_id(ident.imdb)
+            if rec:
+                logging.info("FileBot could not serve %s — naming it from OMDb instead: %s",
+                             ident.imdb, src_file.name)
+                return rename_movie_from_omdb(src_file, ident.imdb, rec.get("Title"),
+                                              str(rec.get("Year") or "")[:4] or None,
+                                              movie_name, year, outcome)
+        return renamed
+    if ident.status == "none" and CFG.LOCAL_NAME_FALLBACK:
+        return rename_movie_from_file(src_file, movie_name, year, ident.reason, outcome)
+    outcome["ok"] = False
+    outcome["reason"] = ident.reason
+    return None
 
 
 def process_movie_group(
@@ -7123,18 +7679,43 @@ def process_movie_group(
         if dry_run:
             # Preview the identification too: a film the real run would refuse
             # to rename must not be previewed as though it had a name.
-            _pinned, _blocked = movie_identity_for_rename(group[0], movie_name, year, imdb_id)
-            if not _pinned:
-                logging.warning("[DRY] Would NOT rename %s — %s", group[0].name, _blocked)
-                predicted_name = None
-                _rename_outcome["ok"] = False
-                _rename_outcome["reason"] = _blocked
-            else:
+            _ident = movie_identity_chain(group[0], movie_name, year, imdb_id)
+            if _ident.imdb and _ident.source == "OMDb":
+                predicted_name = build_movie_output_name(
+                    _ident.title or movie_name, _ident.year or year, _ident.imdb, res_tag,
+                    source_tag, codec_tag, selected_audio_langs)
+                logging.info("[DRY] Final name would be (identified via OMDb): %s", predicted_name)
+            elif _ident.imdb:
                 predicted_name = predict_movie_final_name(
-                    best_video_file, movie_name, year, _pinned, res_tag, source_tag,
+                    best_video_file, movie_name, year, _ident.imdb, res_tag, source_tag,
                     codec_tag, selected_audio_langs, exact=_PREVIEW_EXACT)
                 if predicted_name:
                     logging.info("[DRY] Final name would be: %s", predicted_name)
+            elif _ident.status == "none" and CFG.LOCAL_NAME_FALLBACK:
+                # Same rule as the real run: nothing found anywhere means a name
+                # built from the file alone — but never when the title is only
+                # ambiguous or no database could be asked.
+                if not _local_title_usable(movie_name, year, need_year=True):
+                    _why = "the filename gives no usable title and year"
+                    logging.warning("[DRY] Would NOT rename %s — %s; %s", group[0].name,
+                                    _ident.reason, _why)
+                    _rename_outcome["ok"] = False
+                    _rename_outcome["reason"] = f"{_ident.reason}; {_why}"
+                else:
+                    _bracket = (build_audio_bracket(selected_audio_langs) if selected_audio_langs
+                                else _local_audio_bracket([t for tr, _s in metas.values() for t in tr]))
+                    predicted_name = build_movie_output_name(
+                        _tidy_title(movie_name), year, None, res_tag, source_tag, codec_tag,
+                        [], bracket=_bracket)
+                    _rename_outcome["local"] = True
+                    _rename_outcome["local_name"] = predicted_name
+                    logging.info("[DRY] No database knows %r — would name it from the file alone "
+                                 "(LOCAL): %s", movie_title, predicted_name)
+            else:
+                logging.warning("[DRY] Would NOT rename %s — %s", group[0].name, _ident.reason)
+                predicted_name = None
+                _rename_outcome["ok"] = False
+                _rename_outcome["reason"] = _ident.reason
 
         # ── SKIP-REMUX / RULE-7 CHECKS (single-file groups only) ─────────────
         if len(group) == 1:
@@ -7449,6 +8030,7 @@ def build_tv_output_name(
     res_tag: str,
     codec_tag: str,
     audio_langs: List[str],
+    bracket: Optional[str] = None,
 ) -> str:
     """
     Plex/Jellyfin-friendly TV naming (fallback when FileBot is unavailable):
@@ -7465,7 +8047,7 @@ def build_tv_output_name(
 
     title = sanitize_filename(episode_title) if episode_title else None
 
-    bracket = build_audio_bracket(audio_langs)
+    bracket = bracket or build_audio_bracket(audio_langs)
 
     parts = [base]
     if se:
@@ -7561,6 +8143,15 @@ def process_tv_file(
                     predicted_name = None
                     _rename_outcome["ok"] = False
                     _rename_outcome["reason"] = _dry_why
+                elif not _dry_id and not predicted_name and CFG.LOCAL_NAME_FALLBACK:
+                    # TMDB does not know the show. A real run asks FileBot's TheTVDB
+                    # and TVmaze next — a dry run cannot (without --preview-exact),
+                    # so say what happens if both also find nothing.
+                    _local, _problem = tv_local_name(src)
+                    logging.info("[DRY] TMDB has no match for %r — a real run tries TheTVDB, then "
+                                 "TVmaze; if neither knows it: %s", _dry_bare,
+                                 f"named from the file alone (LOCAL): {_local}" if _local
+                                 else f"left as it is ({_problem})")
 
         # ── SKIP-REMUX / RULE-7 CHECKS ───────────────────────────────────────
         _actual_audio_count = sum(1 for t in tracks if t.type == "audio" and not is_excluded_audio(t))
@@ -7957,6 +8548,12 @@ def main() -> int:
                     help="Do not try to identify tracks tagged 'und'. By default a lone unlabelled "
                          "audio track takes the title's original language and unlabelled text "
                          "subtitles are identified from their own text.")
+    ap.add_argument("--no-local-name", action="store_true",
+                    help="Leave a title that no database knows exactly as it is. By default such a "
+                         "file is named and its tags cleaned from facts in the file itself (title "
+                         "and year from its filename, resolution, codec and audio languages from the "
+                         "video) and reported as LOCAL; nothing is ever invented, and a title with "
+                         "several possible matches is never named this way.")
     ap.add_argument("--force-video-lang", metavar="LANG", default=None,
                     help="Set the VIDEO track language to this value during tag cleaning instead of "
                          "the title's TMDB original language. Accepts any supported language "
@@ -8037,6 +8634,10 @@ def main() -> int:
     if args.no_lang_detect and CFG.DETECT_UNDETERMINED_LANGS:
         CFG = dataclasses.replace(CFG, DETECT_UNDETERMINED_LANGS=False)
         logging.info("Undetermined-language detection disabled (--no-lang-detect).")
+
+    if args.no_local_name and CFG.LOCAL_NAME_FALLBACK:
+        CFG = dataclasses.replace(CFG, LOCAL_NAME_FALLBACK=False)
+        logging.info("Naming from the file alone disabled (--no-local-name).")
 
     global _FETCH_TAGS_ENABLED, _PREVIEW_EXACT
     if args.no_fetch_tags:
@@ -8510,6 +9111,13 @@ def main() -> int:
         for r in not_renamed:
             srcs = ", ".join(p.name for p in r.source_items) if r.source_items else "(none)"
             logging.warning("- %s | %s", srcs, r.details["rename_failed"])
+
+    named_locally = [r for r in results if r.ok and r.details.get("local_named")]
+    if named_locally:
+        logging.info("%s from the file alone (LOCAL): %d file(s) — no database knew them, so "
+                     "no id, poster or description is added.%s",
+                     "Would be named" if args.dry_run else "Named", len(named_locally),
+                     "" if args.dry_run else f" Listed in {LOCAL_NAMED_CSV.name}.")
 
     print_results_table("Run results", results)
 

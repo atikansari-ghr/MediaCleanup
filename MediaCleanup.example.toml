@@ -46,6 +46,13 @@ output_root = 'D:\Media\Fixed'    # remuxed output (mirrors source structure)
 #   strip_prefixes = ["SomeDistributor", "AnotherName"]
 strip_prefixes = []
 
+# When no database knows a title (TMDB, OMDb for films; TheTVDB, TMDB, TVmaze for
+# shows), name the file and clean its tags from facts in the file itself — title and
+# year from its filename, resolution/codec/languages from the video — and report it
+# LOCAL. Nothing is invented (no id, poster or description). Set false (or pass
+# --no-local-name) to leave such files exactly as they are.
+local_fallback = true
+
 [languages]
 # Audio languages to KEEP — everything else is stripped during remux.
 # The list ORDER = audio track order in the output file.

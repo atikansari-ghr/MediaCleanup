@@ -3,6 +3,26 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] — 2026-10-22
+
+### Added
+- **More sources when TMDB does not know a title.** Identification used to stop at TMDB for films and at TheTVDB/TMDB for shows, so anything those lacked (a title released straight to a streaming service, say) was left as it was. The chain is now:
+  - **Films:** TMDB, then **OMDb** (needs `omdb_api_key`; it is IMDB-backed, so it covers titles TMDB lacks).
+  - **Shows:** TheTVDB and TMDB as before, then **TVmaze** (no key needed), held to the same series-name check.
+  - A source is passed over only when it found **nothing**. If it found several titles the chain stops and asks (`--pick`), because another database would only add more guesses; and if a source could not be reached at all, that is never treated as "not found".
+  - Every hit is verified before it is used: the title must match exactly or as a whole-word prefix, the year must be within one for films, and the series name must match for shows. The log names the source that identified each title.
+  - A film OMDb identifies is renamed with this script's own name template, `Title (Year) - ttNNNNNNN - …`, so it does not depend on FileBot reaching OMDb. The same applies to a film chosen with `--imdb` or `--pick` that only OMDb lists: if FileBot cannot serve the id, OMDb supplies the name. Tags for such a film come from OMDb's record of that id — thinner than TMDB's (no collection, no original language) but never a guess.
+- **A title no database knows is named from its own file** instead of being left with its release name. When every source that could be asked found nothing, the file is renamed from facts that are in it — the title and year its filename states, and the resolution, codec and audio languages read from the video — e.g. `Movie (2023) - WebRip.1080p.x264 - [Hindi + English].mkv`, and for an episode `Show Name - S01E02 - 1080p.x264 - [English].mkv`. Its tags are cleaned as usual. Nothing is invented: no id, no poster, no synopsis, no cast.
+  - It is reported as **`LOCAL`**, separate from `OK`, and every such rename is appended to `logs\local_named.csv` (old path, new path, why), so a name no database confirmed can always be told from one that was. It carries no id, so a later run renames it normally once a database knows the title.
+  - It applies **only** when the answer is "nothing found". A title with several possible matches is never named this way (it is listed for `--pick`), and neither is one when no database could be reached. A file with no usable title and year, or no season and episode number, is left as it is and the reason is shown.
+  - Off with `--no-local-name` or `[naming] local_fallback = false`.
+  - `--dry-run` previews the `LOCAL` name; for a show TMDB does not know, a dry run cannot know whether TheTVDB or TVmaze would find it, and says what happens if neither does.
+
+### Changed
+- **A film is no longer tagged from a title search.** Rich tags (genre, director, cast, synopsis) were fetched by an id when the file carried one and otherwise by a title search that took the top hit — which, for a title shared by several films or a title no database knows, embedded another film's cast and synopsis. They are now fetched by id only: a film with no verified id gets basic tags.
+- `--rename` identifies a film through the same chain, so a film only OMDb lists can be renamed (in place or with `--rename-into`). It never names a file from the file alone; that fallback belongs to the processing modes and `--cleantags`/`--cleanmetadata`.
+- OMDb's search results are kept for the run; the free tier allows about a thousand requests a day.
+
 ## [1.10.0] — 2026-10-04
 
 This release also contains everything in 1.6.1 through 1.9.2 below. Those were development milestones and were never tagged on their own, so 1.10.0 follows 1.6.0 directly.

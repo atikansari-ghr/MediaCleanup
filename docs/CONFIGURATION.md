@@ -49,10 +49,12 @@ The `--input` CLI flag overrides `movies_root`/`tv_root` for a single run withou
 | Key | Required | Description |
 |---|---|---|
 | `strip_prefixes` | No (default `[]`) | Extra filename prefixes to remove before the title is read. Prefixes that look like a web address (`www.something.net - …`) are handled automatically; use this for names stamped on with no domain suffix (`SomeDistributor.The.Film.2024.1080p.mkv`). Matched case-insensitively, longest first, chained up to three deep, with a guard that stops it eating a short title. Also used by `--mp4tomkv` when deciding whether a subtitle cue or chapter name is an advertisement, so a name listed here is recognised in both places. |
+| `local_fallback` | No (default `true`) | When **no database knows a title** (every source that could be asked found nothing), name and tag the file from facts in the file itself — the title and year its filename states, and the resolution, codec and audio languages read from the video — and report it `LOCAL`. Nothing is invented (no id, poster or description). Never applies to a title with several possible matches or when no database could be reached. Per-run override: `--no-local-name`. See [Titles no database knows](USAGE.md#titles-no-database-knows). |
 
 ```toml
 [naming]
 strip_prefixes = ["SomeDistributor", "AnotherName"]
+local_fallback = true
 ```
 
 ## `[languages]`
@@ -77,7 +79,7 @@ Verify your keys anytime with `python MediaCleanup.py --validate-keys`.
 |---|---|
 | `tmdb_api_key` | TMDB API key (v3 auth). Free signup: <https://www.themoviedb.org/settings/api>. **Primary source** — best coverage, especially for Indian/regional cinema; serves pre-sized 780×1170 posters. |
 | `fanarttv_api_key` | fanart.tv project key: <https://fanart.tv/get-an-api-key/>. Curated high-quality art; first fallback. TV lookups require `tmdb_api_key` too (TMDB translates to the TVDB ID fanart.tv uses). |
-| `omdb_api_key` | OMDb key (free tier 1,000 req/day): <https://www.omdbapi.com/apikey.aspx>. Last resort — returns a ~300px poster. |
+| `omdb_api_key` | OMDb key (free tier 1,000 req/day): <https://www.omdbapi.com/apikey.aspx>. Last resort for posters (a ~300px image). It is also the **second source for identifying a film** when TMDB has no match, and supplies the tags for a film only OMDb knows. |
 
 ## `[subtitles]`
 
