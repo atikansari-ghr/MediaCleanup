@@ -9,7 +9,7 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
-![Version](https://img.shields.io/badge/version-1.11.0-db2777)
+![Version](https://img.shields.io/badge/version-1.12.0-db2777)
 
 [**Quick start**](#-quick-start) · [**How it works**](#-how-it-works) · [**Commands**](#-which-command-do-i-need) · [**Usage guide**](docs/USAGE.md) · [**Configuration**](docs/CONFIGURATION.md) · [**Changelog**](CHANGELOG.md)
 

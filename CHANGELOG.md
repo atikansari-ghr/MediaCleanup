@@ -3,7 +3,9 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.12.0] — 2026-10-22
+
+This release makes the tool look after itself: it can tell you when a newer release exists, install it with every file verified, repair a damaged install, keep its helper tools current, and be installed from one command.
 
 ### Added
 - **`--version`** prints the tool's version and the versions of what it runs on: Python, MKVToolNix, FileBot, `rich`, Pillow, and the optional `ffmpeg` and `x265`. It needs no configuration, so it works on a fresh install. `ffmpeg` and `x265` are reported but nothing calls them yet; a missing one is not an error.
