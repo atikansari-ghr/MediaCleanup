@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Kept in step with the newest entry in CHANGELOG.md; --version reports it and
 # --check-update compares it with the latest GitHub release.
-__version__ = "1.12.1"
+__version__ = "1.12.2"
 GITHUB_REPO = "atikansari-ghr/MediaCleanup"
 
 # Optional dependency: 'rich' enables colored log output and end-of-run summary

@@ -9,7 +9,7 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
-![Version](https://img.shields.io/badge/version-1.12.1-db2777)
+![Version](https://img.shields.io/badge/version-1.12.2-db2777)
 [![CI](https://github.com/atikansari-ghr/MediaCleanup/actions/workflows/ci.yml/badge.svg)](https://github.com/atikansari-ghr/MediaCleanup/actions/workflows/ci.yml)
 [![Security policy](https://img.shields.io/badge/security-policy-16a34a)](SECURITY.md)
 

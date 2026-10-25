@@ -3,7 +3,7 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.12.2] — 2026-10-25
 
 ### Security
 - **API keys no longer reach logs.** TMDB, OMDb and fanart.tv take the key in the URL's query string, several debug messages printed whole URLs, and `--log-file` is always written at debug level, so a failed request could put a working key into a log that someone then pastes into a bug report. Every log handler now redacts configured keys and passwords wherever they appear, and any `api_key=`, `apikey=`, `token=` or `password=` value, and bearer tokens, in messages and in tracebacks.
