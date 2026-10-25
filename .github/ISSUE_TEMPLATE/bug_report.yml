@@ -1,0 +1,55 @@
+name: Bug report
+description: Something is named, tagged, identified or downloaded wrongly, or the tool fails
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A few things make this much easier to fix.
+        **Please remove secrets first.** Logs written by the tool mask API keys, passwords and tokens, but check anything you paste, and never attach `MediaCleanup.toml`.
+        Use placeholder titles or a public-domain film in examples rather than naming real releases or sites.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The first line of `python MediaCleanup.py --version`
+      placeholder: MediaCleanup 1.12.1
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+      description: Add `--dry-run` if you can reproduce it that way.
+      placeholder: python MediaCleanup.py --movies --filter "Night*" --dry-run
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Paste the relevant output, or the summary table's Status and Detail for the file.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: The rest of `--version` is enough (Python, MKVToolNix, FileBot, Windows).
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed any API key, password or token from what I pasted, and did not attach `MediaCleanup.toml`.
+          required: true
+        - label: My report does not link to, or name, sources of unauthorised copies.
+          required: true

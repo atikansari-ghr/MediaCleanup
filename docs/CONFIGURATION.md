@@ -17,6 +17,9 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 > [!CAUTION]
 > `MediaCleanup.toml` is git-ignored because it contains your private API keys and machine-specific paths. Never commit it; share `MediaCleanup.example.toml` instead.
 
+> [!NOTE]
+> The tool never writes your keys anywhere except to the service they belong to, and masks them in every log line, including `--log-file`. If you ever paste a log or config into an issue, remove the keys first anyway.
+
 > [!TIP]
 > Use **single-quoted literal strings** for Windows paths — backslashes need no escaping: `movies_root = 'D:\Media\Movies'`.
 
@@ -96,7 +99,7 @@ local_fallback = true
 check = true
 ```
 
-A **private** repository needs a read-only token in the `MEDIACLEANUP_GITHUB_TOKEN` environment variable (not in this file, so it cannot be committed by accident).
+The repository is public, so no token is needed. A **private fork** needs a read-only token in the `MEDIACLEANUP_GITHUB_TOKEN` environment variable (not in this file, so it cannot be committed by accident).
 
 ## `[languages]`
 

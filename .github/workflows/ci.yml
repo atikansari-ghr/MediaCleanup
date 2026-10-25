@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# The workflow only reads the repository; it needs no other permission.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Windows, Python ${{ matrix.python }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      # Actions are pinned to full commit hashes, not movable tags.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile
+        run: python -m py_compile MediaCleanup.py
+      - name: Command line starts
+        run: |
+          python MediaCleanup.py --version
+          python MediaCleanup.py --help
+      - name: Tests (no config, no network, no media needed)
+        run: python -m unittest discover -s tests -v

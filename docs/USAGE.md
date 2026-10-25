@@ -78,6 +78,12 @@ Every run ends with a summary table. The **Status** column tells you what happen
 | ⚪ **SKIP** | Nothing needed doing: already covered, already named, or a film too ambiguous to give a poster. | Nothing. |
 | 🔴 **FAIL** | Something went wrong. Sources are untouched. | Read the reason; see [Troubleshooting](#troubleshooting). |
 
+A real summary, with one file in each state:
+
+<div align="center">
+<img src="images/results-table.svg" alt="The run summary table showing OK, LOCAL, PARTIAL, SKIP and FAIL rows" width="100%">
+</div>
+
 ---
 
 ## Quick reference
@@ -170,11 +176,14 @@ python MediaCleanup.py --tv --force-audio-lang 1 Hindi --force-sub-lang 3 Englis
 | `--preview-exact` | With `--dry-run`: ask FileBot itself for each predicted name instead of predicting it from the database. Authoritative but much slower — one FileBot launch per item. |
 | `--verbose` | Debug logging (track decisions, full command lines). |
 | `--workers N` | Parallel worker threads (default: CPU count − 1). |
-| `--log-file PATH` | Also write the log to a file (always plain text). |
+| `--log-file PATH` | Also write the log to a file (always plain text, debug level). API keys, passwords and tokens are masked in it. |
 | `--no-color` | Disable colored output and summary tables (`NO_COLOR` env also honored). |
 | `--no-update-check` | Skip the once-a-day look for a newer release for this run. Config equivalent: `[updates] check = false`. |
 
 ---
+
+> [!TIP]
+> **Sharing a log?** Everything the tool logs, to the console and to `--log-file`, passes through a redactor that masks your API keys, passwords and tokens (including keys that travel in URLs, which TMDB, OMDb and fanart.tv require). Still look before you paste, and never attach `MediaCleanup.toml`.
 
 ## Previewing a run
 
@@ -392,6 +401,10 @@ python MediaCleanup.py --movies --pick 2 3    :: resolve titles 2 and 3 — film
 python MediaCleanup.py --movies --filter "The.Film.2026*" --imdb tt1111111   :: or give the id directly
 ```
 
+<div align="center">
+<img src="images/pick-candidates.svg" alt="A numbered list of films that share a title, with the --pick command to resolve it" width="100%">
+</div>
+
 > [!IMPORTANT]
 > Always pick from the **most recent** listing. The numbers are read back from `logs\pending_identity.csv` exactly as the last run wrote them, so a number always means the title you were shown. The full walkthrough, with sample output, is in [Troubleshooting](#troubleshooting).
 
@@ -501,6 +514,10 @@ An episode is searched by its **series** id with the season and episode from the
 
 **4. Download the best, then verify it against your video.** The subtitle's advertising cues are stripped first (they can run past the end of the video), then it **fits** when its last line ends within about 70%–100% of the video's duration (30 seconds of tolerance), its first line is not past a third of the video, and it has a sensible number of lines. This catches a wrong cut, a wrong film and a truncated file. It cannot catch a small frame-rate drift, which is why frame rates are compared *before* downloading.
 
+<div align="center">
+<img src="images/subtitle-fit.svg" alt="The first subtitle does not fit the video's length, so the next-best is tried and saved" width="100%">
+</div>
+
 **5. If it does not fit, the next-best candidate is tried once.** That uses one more download from your quota, and only happens if quota remains. If that one does not fit either, **nothing is saved** and the summary says why:
 
 ```
@@ -601,6 +618,10 @@ python MediaCleanup.py --version          :: what is installed
 python MediaCleanup.py --check-update     :: is there a newer release, and what changed
 ```
 
+<div align="center">
+<img src="images/version.svg" alt="The output of --version" width="100%">
+</div>
+
 `--version` prints the tool's version and the version of everything it runs on, so a bug report or a "which build do I have?" question has one command to answer it:
 
 ```
@@ -617,6 +638,10 @@ MediaCleanup 1.11.0
 ```
 
 `ffmpeg` and `x265` are listed because future features will use them; today nothing calls them, and "not installed" is not an error. They are looked for in `runtimes\ffmpeg\bin\` and `runtimes\x265\`, then on the `PATH`.
+
+<div align="center">
+<img src="images/check-update.svg" alt="--check-update showing a newer release and what changed" width="100%">
+</div>
 
 **Checking for a newer release.** `--check-update` asks GitHub for the latest *published release* — never a branch — and compares it with your version. If a newer one exists it prints the release address and the changelog entries since your version:
 
@@ -647,7 +672,7 @@ MediaCleanup 1.12.0 is available (you have 1.11.0) - run: python MediaCleanup.py
 > The only thing sent is an ordinary request to `api.github.com` carrying a `MediaCleanup/<version>` user-agent. There is no telemetry.
 
 > [!TIP]
-> If the repository is **private**, GitHub answers "not found" to an anonymous request. Set the environment variable `MEDIACLEANUP_GITHUB_TOKEN` to a read-only personal access token and the check will use it. The token is only ever sent to `api.github.com`, and is dropped if a download is redirected to another host.
+> The update check needs no token because the repository is public. If you run a **private fork**, GitHub answers "not found" to an anonymous request: set the environment variable `MEDIACLEANUP_GITHUB_TOKEN` to a read-only personal access token and the check will use it. The token is only ever sent to `api.github.com`, and is dropped if a download is redirected to another host.
 
 ### Installing, updating and repairing
 
@@ -694,6 +719,10 @@ Release v1.12.0, published 2026-11-01
 Install v1.12.0? [y/N]
 ```
 
+<div align="center">
+<img src="images/update-plan.svg" alt="--update --dry-run showing which files would change" width="100%">
+</div>
+
 - **Every file is verified.** GitHub publishes a hash for each file in a release. The download is unpacked, each file is checked against its published hash, and nothing is written unless every one matches — so what lands on disk is exactly what was released.
 - **Only files the release contains are written.** `MediaCleanup.toml`, `logs\`, `backup\` and the tools in `runtimes\` are never touched, whatever a release lists.
 - **Anything replaced is backed up first** under `backup\update-<from>-to-<to>-<time>\`, and a failure part-way puts every file back. To undo a finished update, copy the files from that folder back, or run `--update-to` the previous version.
@@ -717,6 +746,10 @@ Checking this MediaCleanup 1.11.0 install...
   [ok]   MKVToolNix runs (mkvmerge v103.0 ('The Darkness') 64-bit)
   [--]   FileBot not installed (optional)
 ```
+
+<div align="center">
+<img src="images/repair.svg" alt="--repair --dry-run restoring a deleted and a modified file" width="100%">
+</div>
 
 | Line | Meaning |
 |---|---|
@@ -745,6 +778,10 @@ python MediaCleanup.py --update-runtimes --dry-run
   Pillow      12.2.0                     13.0.0                     UPDATE: newer version available (pip)
 ```
 
+<div align="center">
+<img src="images/update-runtimes.svg" alt="--update-runtimes --dry-run listing each tool with its installed and latest versions" width="100%">
+</div>
+
 | Tool | Handling |
 |---|---|
 | **MKVToolNix** | Updated automatically from the official portable build, **SHA-256 verified**. Only a copy inside `runtimes\` is managed; one installed elsewhere is reported. |
@@ -759,7 +796,7 @@ Downloads come only from `mkvtoolnix.download`, `www.gyan.dev` and `pypi.org`, o
 `install.ps1` gets a machine from nothing to a working install with one command. It is deliberately thin: it finds or installs Python, unpacks the release, writes a first `MediaCleanup.toml`, and then uses the tool's own `--repair --files-only` (to verify every file) and `--install` (for MKVToolNix and the packages).
 
 ```powershell
-# from a release (needs a public repository)
+# from the latest release (no account, no token)
 irm https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.ps1 | iex
 
 # or download it, read it, and run it with options

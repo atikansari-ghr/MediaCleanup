@@ -10,6 +10,8 @@
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
 ![Version](https://img.shields.io/badge/version-1.12.1-db2777)
+[![CI](https://github.com/atikansari-ghr/MediaCleanup/actions/workflows/ci.yml/badge.svg)](https://github.com/atikansari-ghr/MediaCleanup/actions/workflows/ci.yml)
+[![Security policy](https://img.shields.io/badge/security-policy-16a34a)](SECURITY.md)
 
 [**Quick start**](#-quick-start) · [**How it works**](#-how-it-works) · [**Commands**](#-which-command-do-i-need) · [**Usage guide**](docs/USAGE.md) · [**Configuration**](docs/CONFIGURATION.md) · [**Changelog**](CHANGELOG.md)
 
@@ -59,7 +61,7 @@ Plus standalone maintenance modes, each runnable on its own:
 irm https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.ps1 | iex
 ```
 
-The installer finds or installs Python, unpacks the release, verifies every file against the hashes GitHub published for it, fetches MKVToolNix (checksum-verified), writes a first config from your answers and creates a launcher. Prefer to read it first? Download `install.ps1` from the release and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. See [the installer](docs/USAGE.md#the-installer) for every option.
+The installer finds or installs Python, unpacks the release, verifies every file against the hashes GitHub published for it, fetches MKVToolNix (checksum-verified), writes a first config from your answers and creates a launcher. Prefer to read it first? Download `install.ps1` from the release and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It needs no account, no token and no administrator rights. See [the installer](docs/USAGE.md#the-installer) for every option.
 
 ### By hand
 
@@ -168,17 +170,57 @@ Every mode supports `--dry-run` to preview and `--filter` / `--input` to scope t
 
 ## 🔎 In action
 
+Every screenshot below is the tool's real output (the same code and commands you run), shown on a public-domain film or on placeholder titles.
+
+### Day to day
+
 Rename messy filenames with a safe preview first — real database lookups, exact proposed names:
 
 ![Rename preview](docs/images/rename-preview.svg)
+
+Every run ends with a summary that says exactly what happened to each file — `OK`, `LOCAL`, `PARTIAL`, `SKIP` or `FAIL`:
+
+![The summary table](docs/images/results-table.svg)
+
+When several titles share a name, nothing is guessed: you get a numbered list and pick with `--pick`:
+
+![Choosing between ambiguous titles](docs/images/pick-candidates.svg)
 
 Embed cover art across the library — every poster audited in an HTML review gallery:
 
 ![Cover art run](docs/images/coverart.svg)
 
+### Subtitles
+
+A subtitle is checked against your video's length; one that does not fit is discarded and the next-best candidate is tried once:
+
+![Subtitle fit check](docs/images/subtitle-fit.svg)
+
+### Keeping it healthy
+
 Verify your API keys before spending any quota:
 
 ![API key validation](docs/images/validate-keys.svg)
+
+See what you are running:
+
+![Version](docs/images/version.svg)
+
+Find out whether a newer release exists, and what changed:
+
+![Check for an update](docs/images/check-update.svg)
+
+See exactly what an update would change before it touches anything:
+
+![Update plan](docs/images/update-plan.svg)
+
+Fix a damaged install without touching your config or logs:
+
+![Repair](docs/images/repair.svg)
+
+Keep MKVToolNix, ffmpeg and the pip packages current, and see what is only reported:
+
+![Runtime updates](docs/images/update-runtimes.svg)
 
 ## 🏷️ Output naming
 
@@ -222,12 +264,30 @@ MediaCleanup\
 ├── install.ps1                  ← one-command installer (also attached to each release)
 ├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
 ├── MediaCleanup.toml            ← your config + API keys (git-ignored)
+├── tests\                       ← offline tests: python -m unittest discover -s tests
 ├── runtimes\                    ← portable tools (binaries git-ignored)
 │   ├── mkvtoolnix\              ←   REQUIRED: extract MKVToolNix portable here
 │   └── FileBot\                 ←   OPTIONAL: portable FileBot here
 ├── logs\                        ← rename history, ledgers, pending list, reviews (auto-created)
 └── docs\                        ← usage & configuration guides, diagrams
 ```
+
+## 🔐 Privacy and security
+
+MediaCleanup runs on your machine and has **no telemetry**. The only things that leave it are requests to the services you set up, listed here:
+
+| Feature | Sends to | What |
+|---|---|---|
+| Identify titles, tags, posters | TMDB, OMDb, fanart.tv | A title, year or id, and your API key for that service |
+| Subtitles | OpenSubtitles.com | An id, your file's hash, and your API key (plus your login if you set one) |
+| `--check-update`, `--update`, the daily notice | GitHub (`api.github.com`) | An ordinary request for the latest release |
+| `--update-runtimes`, `--install` | `mkvtoolnix.download`, `www.gyan.dev`, `pypi.org` | A request for the file (checksum-verified) |
+
+- **Your keys stay yours.** They live in `MediaCleanup.toml`, which is git-ignored, and every log line is passed through a redactor that masks API keys, passwords and tokens, so a log you paste into a bug report does not leak them.
+- **Downloads are checked.** Updates are verified file by file against the hashes GitHub publishes, tools against a SHA-256 published beside them, and third-party links are only fetched over HTTPS from public addresses.
+- **The repository is protected:** secret scanning with push protection, code scanning (CodeQL), Dependabot, private vulnerability reporting, and rules that stop `master` and the `v*` release tags from being deleted or rewritten.
+
+Found a vulnerability? Please report it privately; see [SECURITY.md](SECURITY.md).
 
 ## ⚖️ Intended use
 
@@ -246,6 +306,9 @@ You are responsible for having the right to the files you process.
 | 📖 [docs/USAGE.md](docs/USAGE.md) | The full usage guide — every flag, every workflow, how identification works, recipes and troubleshooting |
 | ⚙️ [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `MediaCleanup.toml` key explained, with a full annotated example |
 | 📝 [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
+| 🔐 [SECURITY.md](SECURITY.md) | How to report a vulnerability, and how the tool is built to be safe |
+| 🤝 [CONTRIBUTING.md](CONTRIBUTING.md) | What fits, how to report a bug, how to change the code and run the tests |
+| 📜 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | How we treat each other |
 
 ## 🙏 Credits
 

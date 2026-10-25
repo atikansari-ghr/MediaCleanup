@@ -882,6 +882,60 @@ class Result:
 _LOG_LOCK = threading.Lock()
 
 
+# --- Keeping secrets out of logs -------------------------------------------------------
+# TMDB, OMDb and fanart.tv take the API key in the URL's query string, and the log file is
+# always written at DEBUG level, so a failed request could print a working key into a log that
+# someone then pastes into a bug report. Every log handler therefore passes its output through
+# redact_secrets(): known credential values are masked wherever they appear, and so is any
+# `key=value` pair that names an API key, token or password.
+
+_SECRET_PARAM_RX = re.compile(r"(?i)(api[_-]?key|apikey|access[_-]?token|token|password|passwd|secret)=([^&\s\"']+)")
+_BEARER_RX = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._~+/=-]{12,})")
+
+
+def _secret_values() -> List[str]:
+    values: List[str] = []
+    cfg = globals().get("CFG")
+    if cfg is not None:
+        for name, minimum in (("TMDB_API_KEY", 6), ("FANARTTV_API_KEY", 6), ("OMDB_API_KEY", 6),
+                              ("OS_API_KEY", 6), ("OS_PASSWORD", 5)):
+            v = str(getattr(cfg, name, "") or "")
+            if len(v) >= minimum:
+                values.append(v)
+    token = os.environ.get("MEDIACLEANUP_GITHUB_TOKEN", "").strip()
+    if len(token) >= 8:
+        values.append(token)
+    return values
+
+
+def redact_secrets(text: str) -> str:
+    """`text` with every credential masked as ***."""
+    if not text:
+        return text
+    out = _SECRET_PARAM_RX.sub(lambda m: f"{m.group(1)}=***", text)
+    out = _BEARER_RX.sub(lambda m: f"{m.group(1)}***", out)
+    for v in _secret_values():
+        out = out.replace(v, "***")
+    return out
+
+
+class _RedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            clean = redact_secrets(message)
+            if clean != message:
+                record.msg, record.args = clean, ()
+            if record.exc_info and not record.exc_text:
+                import traceback
+                record.exc_text = redact_secrets("".join(traceback.format_exception(*record.exc_info)).rstrip("\n"))
+            elif record.exc_text:
+                record.exc_text = redact_secrets(record.exc_text)
+        except Exception:
+            pass                      # a logging filter must never break the program
+        return True
+
+
 def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -904,11 +958,13 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
                           omit_repeated_times=False)
         rh.setLevel(logging.DEBUG if verbose else logging.INFO)
         rh.setFormatter(logging.Formatter("%(message)s"))
+        rh.addFilter(_RedactingFilter())
         logger.addHandler(rh)
     else:
         sh = logging.StreamHandler(sys.stdout)
         sh.setLevel(logging.DEBUG if verbose else logging.INFO)
         sh.setFormatter(fmt)
+        sh.addFilter(_RedactingFilter())
         logger.addHandler(sh)
 
     # Log file is always plain text (grep-able), regardless of console styling.
@@ -917,6 +973,7 @@ def setup_logging(verbose: bool, log_file: Optional[Path]) -> None:
         fh = logging.FileHandler(log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
+        fh.addFilter(_RedactingFilter())
         logger.addHandler(fh)
 
 
@@ -4759,10 +4816,51 @@ def _http_get_json(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _public_https_url(url: str) -> bool:
+    """
+    True for an https URL that points at a public host. Image and subtitle links come from
+    third-party API answers, so they are not trusted blindly: plain http, localhost and
+    private, loopback or link-local addresses (anything on the user's own network) are refused.
+    """
+    import ipaddress
+    import socket
+    try:
+        parts = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            addresses = [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)]
+        except (OSError, ValueError):
+            return True               # it will not resolve for the request either, so that fails on its own
+    return not any(a.is_private or a.is_loopback or a.is_link_local or a.is_reserved or a.is_multicast
+                   or a.is_unspecified for a in addresses)
+
+
+class _PublicHttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only if it still points at a public https host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _public_https_url(newurl):
+            raise urllib.error.URLError(f"refused a redirect to a non-public or non-https address: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_PUBLIC_OPENER = urllib.request.build_opener(_PublicHttpsRedirects())
+
+
 def _http_get_bytes(url: str, timeout: int = 60) -> Optional[bytes]:
+    if not _public_https_url(url):
+        logging.warning("Not downloading %s: only public https addresses are fetched.", redact_secrets(url))
+        return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _HTTP_USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _PUBLIC_OPENER.open(req, timeout=timeout) as resp:
             data = resp.read()
         return data if data else None
     except Exception as e:
@@ -5040,7 +5138,7 @@ def validate_api_keys() -> Dict[str, str]:
     """
     Check each configured [coverart] API key with one cheap call.
     Returns {source: 'ok' | 'invalid' | 'network error' | 'not configured'}.
-    Uses tt0111161 (a well-known title) as an always-existing probe title.
+    Uses tt0063350 (a public-domain film) as an always-existing probe title.
     """
     status: Dict[str, str] = {}
 
@@ -5055,14 +5153,14 @@ def validate_api_keys() -> Dict[str, str]:
         status["fanart.tv"] = "not configured"
     else:
         code, _ = _http_get_json_status(
-            f"https://webservice.fanart.tv/v3/movies/tt0111161?api_key={CFG.FANARTTV_API_KEY}")
+            f"https://webservice.fanart.tv/v3/movies/tt0063350?api_key={CFG.FANARTTV_API_KEY}")
         status["fanart.tv"] = "ok" if code == 200 else ("invalid" if code == 401 else "network error")
 
     if not CFG.OMDB_API_KEY:
         status["OMDb"] = "not configured"
     else:
         code, data = _http_get_json_status(
-            f"https://www.omdbapi.com/?i=tt0111161&apikey={CFG.OMDB_API_KEY}")
+            f"https://www.omdbapi.com/?i=tt0063350&apikey={CFG.OMDB_API_KEY}")
         if code == 200 and data and data.get("Response") == "True":
             status["OMDb"] = "ok"
         elif code == 401 or (data and "invalid api key" in str(data.get("Error", "")).lower()):
@@ -6799,7 +6897,12 @@ class SubtitleFetcher:
             self.remaining = data["remaining"]
             if self.remaining <= 0:
                 self.quota_exhausted, self.stop_reason = True, "daily download quota used up"
-        return _http_get_bytes(data["link"])
+        link = str(data["link"])
+        host = (urllib.parse.urlparse(link).hostname or "").lower()
+        if host != "opensubtitles.com" and not host.endswith(".opensubtitles.com"):
+            logging.warning("OpenSubtitles gave a download link on an unexpected host (%s) - not following it.", host or "?")
+            return None
+        return _http_get_bytes(link)
 
 
 def check_opensubtitles() -> str:
@@ -9779,7 +9882,15 @@ def extract_archive(archive: Path, dest: Path) -> str:
     cmd = ([path, "x", "-y", f"-o{dest}", str(archive)] if kind == "7z"
            else [path, "-xf", str(archive), "-C", str(dest)])
     r = run_cmd(cmd, timeout_sec=900)
-    return "" if r.ok else f"the archive could not be unpacked: {_first_line(r.err) or _first_line(r.out)}"
+    if not r.ok:
+        return f"the archive could not be unpacked: {_first_line(r.err) or _first_line(r.out)}"
+    # A link inside an archive could point outside the folder it was unpacked into, so none are accepted.
+    for dirpath, dirnames, filenames in os.walk(dest):
+        for name in dirnames + filenames:
+            q = Path(dirpath) / name
+            if q.is_symlink() or (hasattr(q, "is_junction") and q.is_junction()):
+                return f"the archive contains a link ({q.name}), which is not accepted"
+    return ""
 
 
 def _find_dir_with(base: Path, marker: str, max_depth: int = 3) -> Optional[Path]:

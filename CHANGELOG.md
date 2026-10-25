@@ -3,6 +3,23 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- **API keys no longer reach logs.** TMDB, OMDb and fanart.tv take the key in the URL's query string, several debug messages printed whole URLs, and `--log-file` is always written at debug level, so a failed request could put a working key into a log that someone then pastes into a bug report. Every log handler now redacts configured keys and passwords wherever they appear, and any `api_key=`, `apikey=`, `token=` or `password=` value, and bearer tokens, in messages and in tracebacks.
+- **Third-party links are no longer trusted blindly.** Poster and subtitle links come back from API answers. They are now fetched only over HTTPS from public addresses (never `localhost`, private, loopback or link-local ranges, including after a redirect or when a name resolves to one), and a subtitle link must be on OpenSubtitles' own domain.
+- **Unpacked archives may not contain links.** A symlink or junction inside a `.7z` could point outside the folder it was unpacked into; one is now refused.
+- The validation probe for fanart.tv and OMDb uses the public-domain film's id instead of a commercial film's.
+
+### Added
+- **Repository security and community files:** `SECURITY.md` (private reporting route, how the tool is built to be safe), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue templates (with a reminder to remove secrets and not to name infringing sources) and a pull-request template.
+- **Offline tests in the repository** (`tests/`, run with `python -m unittest discover -s tests`), needing no config, network or media: log redaction, the download and redirect guards, the self-update verification, subtitle scoring and verification, advert detection, and a scan that fails if any control character, secret or private file appears in the tree.
+- **Continuous integration** (`.github/workflows/ci.yml`): compile, command-line smoke test and the tests, on Windows with Python 3.11 and 3.13, using read-only permissions and actions pinned to full commit hashes.
+
+### Documentation
+- **Screenshots regenerated from the real tool**, with personal paths removed: the summary table showing every status, the numbered `--pick` list, the subtitle fit check, `--version`, `--check-update`, the update plan, `--repair`, `--update-runtimes` and the key check. The cover-art screenshot no longer shows a personal folder name.
+- The README gains a Privacy and security section (what leaves your machine, and where), a gallery of those screenshots, CI and security badges and links to the new community files; the usage and configuration guides place each screenshot beside the feature it shows, and no longer describe the repository as private.
+
 ## [1.12.1] — 2026-10-22
 
 A patch release: it fixes a bug that has been in the last three releases, makes `--subtitles` work with just an API key and choose subtitles that fit the video, and fixes upgrading an old install with the installer.

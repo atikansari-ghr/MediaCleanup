@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation, with a placeholder title or a public-domain film if you need an example.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: How should it behave when it is not sure?
+      description: The tool's rule is to identify exactly one title, verify what comes back, and refuse rather than guess. What should it do here when it cannot be certain?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This is about organising files the user already owns. It does not ask the tool to find, download or link to media.
+          required: true
