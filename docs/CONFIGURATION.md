@@ -12,7 +12,7 @@
 
 All configuration lives in **`MediaCleanup.toml`**, which must sit in the same folder as `MediaCleanup.py`. The script resolves it relative to its own location, so it works no matter which directory you run from.
 
-Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
+Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit. On Linux use `cp MediaCleanup.linux.example.toml MediaCleanup.toml`; it is the same file with Linux paths and without `[tools]`, because the tools are found on the `PATH` (see [Running on Linux](USAGE.md#running-on-linux)).
 
 > [!CAUTION]
 > `MediaCleanup.toml` is git-ignored because it contains your private API keys and machine-specific paths. Never commit it; share `MediaCleanup.example.toml` instead.
@@ -29,7 +29,7 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
 | Section | Controls | Required |
 |---|---|---|
-| 🔧 [`[tools]`](#tools) | Where MKVToolNix lives | 🔴 Yes |
+| 🔧 [`[tools]`](#tools) | Where MKVToolNix lives | 🔴 Yes on Windows; optional on Linux (found on the `PATH`) |
 | 🎞️ [`[filebot]`](#filebot) | Optional FileBot renaming | ⚪ No |
 | 📁 [`[paths]`](#paths) | Movie, TV and output folders | 🔴 Yes |
 | 🏷️ [`[naming]`](#naming) | Prefix stripping, and the LOCAL-name fallback | ⚪ No |
@@ -44,7 +44,7 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
 | Key | Required | Description |
 |---|---|---|
-| `mkvtoolnix_dir` | **Yes** | Folder containing the MKVToolNix binaries. Download: <https://mkvtoolnix.download/> |
+| `mkvtoolnix_dir` | **Yes** on Windows; optional on Linux | Folder containing the MKVToolNix binaries. Download: <https://mkvtoolnix.download/>. On Linux, leave it out to use the `apt` install on the `PATH`; a tool missing from a folder you set is still looked up on the `PATH`. |
 | `mkvmerge` | No | Override path to `mkvmerge.exe`. Default: `<mkvtoolnix_dir>\mkvmerge.exe` |
 | `mkvpropedit` | No | Override path to `mkvpropedit.exe`. Default: `<mkvtoolnix_dir>\mkvpropedit.exe` |
 | `mkvinfo` | No | Override path to `mkvinfo.exe`. Default: `<mkvtoolnix_dir>\mkvinfo.exe` |
@@ -56,7 +56,7 @@ Setup: `copy MediaCleanup.example.toml MediaCleanup.toml`, then edit.
 
 | Key | Required | Description |
 |---|---|---|
-| `exe` | No | Path to `filebot.exe`. If omitted or nonexistent, all FileBot steps are skipped and the script uses its built-in filename heuristics. |
+| `exe` | No | Path to `filebot.exe` (`filebot` on Linux). If omitted or nonexistent, all FileBot steps are skipped and the script uses its built-in filename heuristics. **On Linux, `filebot` on the `PATH` is used automatically** when `exe` is omitted. |
 | `db` | No | Movie database for FileBot lookups. Default: `"TheMovieDB"`. TV uses TheTVDB first, with TMDB and then TVmaze as fallbacks for a series TheTVDB cannot identify. |
 
 > [!NOTE]

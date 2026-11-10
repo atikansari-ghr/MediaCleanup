@@ -3,6 +3,24 @@
 All notable changes to MediaCleanup are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Runs on Debian**, on a machine, in a VM or in an LXC container. Tested for real on Debian 13 (Python 3.13, MKVToolNix from `apt`) and in CI on Debian 12 and 13. Ubuntu 24.04 and newer use the same packages and should work, but are untested.
+- **`install.sh`**, the Linux counterpart of `install.ps1` (attached to each release): installs Python, MKVToolNix, `rich` and Pillow with `apt` (ffmpeg with `--with-ffmpeg`), unpacks the release into `/opt/MediaCleanup`, verifies every file against the hashes GitHub publishes for it, writes a first config readable only by its owner, and adds a `mediacleanup` command. Re-running it updates and never touches `MediaCleanup.toml`.
+- **`MediaCleanup.linux.example.toml`**: the same settings with Linux paths and no `[tools]` section.
+- **Tools are found on the `PATH` on Linux.** `[tools] mkvtoolnix_dir` is optional there (and still required on Windows), a tool missing from a configured folder is looked up on the `PATH`, and `filebot` on the `PATH` is used when `[filebot] exe` is omitted. Windows behaves exactly as before.
+- **`--update-runtimes`, `--install` and `--repair` on Linux** read what `apt` offers (`apt-cache policy`, no network of their own) and print the command to run, because `apt` needs root and the tool never does. `--install` exits `1` after printing it, since nothing was installed.
+- CI runs the tests and `install.sh` end to end on Debian 12 and 13, and 12 new tests cover the Linux behaviour on any host.
+
+### Fixed
+- **A file ending in `.MKV` (or any other capital) was invisible on Linux**, where file names are case-sensitive. Every scan now matches the extension in any case.
+- **File names with accents could not be opened under the plain `C` locale** a container's shell usually has: the programs the tool starts (MKVToolNix, FileBot on Java) cut the name at the first non-ASCII byte. They are now started with a UTF-8 locale, unless you chose one. Not an issue on Windows.
+- `--version` without a usable config printed the same multi-line error three times; it now looks for the tools on the `PATH` and reports the config problem once.
+
+### Documentation
+- New [Running on Linux](docs/USAGE.md#running-on-linux) section (installer, what differs from Windows, container notes, mounting a network share in an unprivileged LXC, installing FileBot and activating its licence, scheduling), Linux quick start and requirements in the README, and Linux notes in the configuration guide and `runtimes/README.md`.
+
 ## [1.12.2] — 2026-10-25
 
 ### Security

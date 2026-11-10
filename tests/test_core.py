@@ -12,12 +12,15 @@ import hashlib
 import importlib.util
 import io
 import logging
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+import unittest.mock as mock
 import zipfile
 from pathlib import Path
 
@@ -29,7 +32,7 @@ _spec.loader.exec_module(mc)
 
 
 class SourceIntegrity(unittest.TestCase):
-    TEXT = (".py", ".md", ".toml", ".ps1", ".yml", ".yaml", ".svg", ".txt", ".json", ".gitignore")
+    TEXT = (".py", ".md", ".toml", ".ps1", ".sh", ".yml", ".yaml", ".svg", ".txt", ".json", ".gitignore")
     SKIP_DIRS = {".git", "runtimes", "logs", "backup", "__pycache__", "linkedin", "scratch"}
 
     def files(self):
@@ -326,6 +329,142 @@ class Naming(unittest.TestCase):
         self.assertTrue(mc._title_prefix_matches("The Film: A Longer Subtitle", "The Film"))
         self.assertFalse(mc._title_prefix_matches("The Filmmaker", "The Film"))
         self.assertEqual(mc._match_key("A & B"), mc._match_key("A.And.B"))
+
+
+class LinuxSupport(unittest.TestCase):
+    """Debian support. IS_WINDOWS is switched so these run, and mean the same, on any host."""
+
+    def linux(self):
+        return mock.patch.object(mc, "IS_WINDOWS", False)
+
+    def test_executable_names(self):
+        with self.linux():
+            self.assertEqual(mc.exe_name("mkvmerge"), "mkvmerge")
+        with mock.patch.object(mc, "IS_WINDOWS", True):
+            self.assertEqual(mc.exe_name("mkvmerge"), "mkvmerge.exe")
+
+    def test_mkv_scan_ignores_the_case_of_the_extension(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sub").mkdir()
+            for name in ("a.mkv", "B.MKV", "c.Mkv", "d.txt", "sub/e.MKV", "sub/f.mkv.bak"):
+                (root / name).write_bytes(b"x")
+            (root / "dir.mkv").mkdir()
+            self.assertEqual(sorted(p.name for p in mc.iter_mkv_files(root)), ["B.MKV", "a.mkv", "c.Mkv"])
+            self.assertEqual(len(mc.iter_mkv_files(root, recursive=True)), 4)
+
+    def write_config(self, folder, body=""):
+        path = Path(folder) / "MediaCleanup.toml"
+        path.write_text('[paths]\nmovies_root = "/m"\ntv_root = "/t"\noutput_root = "/o"\n' + body, encoding="utf-8")
+        return path
+
+    def test_tools_are_found_on_the_path_when_no_folder_is_configured(self):
+        with tempfile.TemporaryDirectory() as d:
+            bin_dir = Path(d) / "bin"
+            bin_dir.mkdir()
+            for name in ("mkvmerge", "mkvpropedit", "filebot"):
+                (bin_dir / name).write_bytes(b"x")
+            which = lambda n: str(bin_dir / n) if (bin_dir / n).exists() else None
+            with self.linux(), mock.patch.object(mc.shutil, "which", which):
+                cfg = mc.load_config(self.write_config(d))
+            self.assertEqual(cfg.MKVMERGE_EXE, bin_dir / "mkvmerge")
+            self.assertEqual(cfg.MKVPROPEDIT_EXE, bin_dir / "mkvpropedit")
+            self.assertEqual(cfg.FILEBOT_EXE, bin_dir / "filebot")
+
+    def test_a_configured_folder_that_lacks_a_tool_falls_back_to_the_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            bin_dir, empty = Path(d) / "bin", Path(d) / "empty"
+            bin_dir.mkdir()
+            empty.mkdir()
+            (bin_dir / "mkvmerge").write_bytes(b"x")
+            which = lambda n: str(bin_dir / n) if (bin_dir / n).exists() else None
+            with self.linux(), mock.patch.object(mc.shutil, "which", which):
+                cfg = mc.load_config(self.write_config(d, f'[tools]\nmkvtoolnix_dir = "{empty.as_posix()}"\n'))
+            self.assertEqual(cfg.MKVMERGE_EXE, bin_dir / "mkvmerge")
+
+    def test_windows_keeps_requiring_the_folder_and_never_guesses_filebot(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mc, "IS_WINDOWS", True):
+            with self.assertRaises(mc.ConfigError):
+                mc.load_config(self.write_config(d))
+            with mock.patch.object(mc.shutil, "which", lambda n: "/somewhere/filebot"):
+                cfg = mc.load_config(self.write_config(d, '[tools]\nmkvtoolnix_dir = "x"\n'))
+            self.assertFalse(cfg.FILEBOT_EXE.exists())
+
+    def test_apt_versions_are_read_and_compared(self):
+        self.assertEqual(mc._deb_upstream("1:9.0.2-1~deb13u1"), "9.0.2")
+        self.assertEqual(mc._deb_upstream("92.0-1+deb13u1"), "92.0")
+        self.assertIsNone(mc._deb_upstream(None))
+        policy = "mkvtoolnix:\n  Installed: (none)\n  Candidate: 92.0-1+deb13u1\n  Version table:\n"
+        with mock.patch.object(mc.shutil, "which", lambda n: "/usr/bin/apt-cache"), \
+                mock.patch.object(mc, "run_cmd", lambda *a, **k: mc.CmdResult(True, 0, policy, "", [])):
+            self.assertEqual(mc._apt_policy("mkvtoolnix"), (None, "92.0-1+deb13u1"))
+        with mock.patch.object(mc.shutil, "which", lambda n: None):
+            self.assertEqual(mc._apt_policy("mkvtoolnix"), (None, None))
+
+    def test_apt_commands_only_use_sudo_when_not_root(self):
+        with mock.patch.object(os, "geteuid", lambda: 0, create=True):
+            self.assertEqual(mc._apt_command("ffmpeg"), "apt-get update && apt-get install -y ffmpeg")
+        with mock.patch.object(os, "geteuid", lambda: 1000, create=True):
+            self.assertEqual(mc._apt_command("ffmpeg", upgrade=True),
+                             "sudo apt-get update && sudo apt-get install -y --only-upgrade ffmpeg")
+
+    def patched_tools(self, installed="92.0", candidate="1:103.0-1"):
+        refuse = mock.Mock(side_effect=AssertionError("Linux must not download runtimes"))
+        return mock.patch.multiple(
+            mc, _apt_policy=lambda pkg: (installed, candidate), mkvtoolnix_installed=lambda exe: installed,
+            _find_optional_tool=lambda *a, **k: None, _package_installed=lambda pkg: None,
+            _fetch_text=refuse, _download_file=refuse)
+
+    def test_runtime_report_reads_apt_and_never_downloads(self):
+        with self.linux(), self.patched_tools(), mock.patch.object(mc.shutil, "which", lambda n: "/usr/bin/" + n):
+            rows = {s.key: s for s in mc._gather_runtime_status_linux(ROOT, None)}
+        mkv = rows["mkvtoolnix"]
+        self.assertEqual((mkv.installed, mkv.latest, mkv.action), ("92.0", "103.0", "none"))
+        self.assertIn("--only-upgrade mkvtoolnix", mkv.extra["apt"])
+        self.assertIn("newer version in apt", mkv.note)
+        self.assertNotIn("apt", rows["ffmpeg"].extra)                      # optional and absent: reported, not forced
+
+    def test_update_runtimes_and_install_print_the_command_and_change_nothing(self):
+        out = io.StringIO()
+        with self.linux(), self.patched_tools(), mock.patch.object(mc.shutil, "which", lambda n: "/usr/bin/" + n), \
+                mock.patch("sys.stdout", out):
+            self.assertEqual(mc.run_update_runtimes(ROOT, dry_run=False, assume_yes=True), 0)
+            self.assertEqual(mc.run_install("ffmpeg", ROOT, assume_yes=True), 1)
+        text = out.getvalue()
+        self.assertIn("apt-get install -y --only-upgrade mkvtoolnix", text)
+        self.assertIn("apt-get install -y ffmpeg", text)
+        self.assertIn("needs root", text)
+
+    def test_children_get_a_utf8_locale_unless_the_user_chose_one(self):
+        cases = [({}, "C.UTF-8"), ({"LANG": "C"}, "C.UTF-8"), ({"LANG": "POSIX"}, "C.UTF-8"),
+                 ({"LANG": "en_US.UTF-8"}, None), ({"LC_ALL": "de_DE.UTF-8", "LANG": "C"}, "de_DE.UTF-8")]
+        for env, expected in cases:
+            with self.linux(), mock.patch.dict(os.environ, env, clear=True):
+                mc.ensure_utf8_locale()
+                self.assertEqual(os.environ.get("LC_ALL"), expected, env)
+        with mock.patch.object(mc, "IS_WINDOWS", True), mock.patch.dict(os.environ, {}, clear=True):
+            mc.ensure_utf8_locale()
+            self.assertNotIn("LC_ALL", os.environ)
+
+    def test_linux_example_config_matches_the_windows_one(self):
+        read = lambda name: mc._flatten_toml(mc.tomllib.loads((ROOT / name).read_text(encoding="utf-8")))
+        windows, linux = read("MediaCleanup.example.toml"), read("MediaCleanup.linux.example.toml")
+        self.assertEqual(set(windows) - set(linux), {"tools.mkvtoolnix_dir", "filebot.exe"})   # found on the PATH instead
+        self.assertEqual(set(linux) - set(windows), set())
+        for key in set(linux) - {"paths.movies_root", "paths.tv_root", "paths.output_root"}:
+            self.assertEqual(linux[key], windows[key], key)
+
+    def test_the_installer_script_is_sound(self):
+        script = ROOT / "install.sh"
+        data = script.read_bytes()
+        self.assertNotIn(b"\r", data, "install.sh must keep LF line endings or Linux cannot run it")
+        self.assertTrue(data.startswith(b"#!/usr/bin/env bash\n"))
+        self.assertIn(b"set -euo pipefail", data)
+        self.assertNotIn(b"eval ", data)
+        self.assertTrue(all(b < 128 for b in data), "install.sh is plain ASCII")
+        bash = shutil.which("bash")
+        if bash:
+            self.assertEqual(subprocess.run([bash, "-n", str(script)], capture_output=True).returncode, 0)
 
 
 if __name__ == "__main__":

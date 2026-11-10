@@ -670,6 +670,27 @@ class ConfigError(Exception):
 _SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = _SCRIPT_DIR / "MediaCleanup.toml"
 
+IS_WINDOWS = os.name == "nt"
+
+
+def exe_name(name: str) -> str:
+    """'mkvmerge' -> 'mkvmerge.exe' on Windows, unchanged elsewhere."""
+    return name + ".exe" if IS_WINDOWS else name
+
+
+def ensure_utf8_locale() -> None:
+    """
+    A container's shell often has the plain 'C' locale. Python copes, but the programs
+    it starts (FileBot runs on Java) then read non-ASCII file names wrongly, so children
+    are given a UTF-8 locale instead. A locale the user chose is left alone.
+    """
+    if IS_WINDOWS:
+        return
+    current = os.environ.get("LC_ALL") or os.environ.get("LC_CTYPE") or os.environ.get("LANG") or ""
+    if current and current.upper() not in ("C", "POSIX"):
+        return
+    os.environ["LC_ALL"] = "C.UTF-8"
+
 
 def load_config(config_file: Path = CONFIG_FILE) -> Config:
     """
@@ -686,13 +707,18 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         raise ConfigError(
             f"Config file not found: {config_file}\n"
             "Create it with [tools], [paths] (and optional [filebot]) sections. Example:\n"
-            "  [tools]\n"
-            "  mkvtoolnix_dir = 'D:\\Tools\\mkvtoolnix'\n"
-            "  [paths]\n"
-            "  movies_root = 'D:\\Media\\Movies'\n"
-            "  tv_root     = 'D:\\Media\\TV'\n"
-            "  work_root   = 'D:\\Media\\ToFix'\n"
-            "  output_root = 'D:\\Media\\Fixed'"
+            + ("  [tools]\n"
+               "  mkvtoolnix_dir = 'D:\\Tools\\mkvtoolnix'\n"
+               "  [paths]\n"
+               "  movies_root = 'D:\\Media\\Movies'\n"
+               "  tv_root     = 'D:\\Media\\TV'\n"
+               "  work_root   = 'D:\\Media\\ToFix'\n"
+               "  output_root = 'D:\\Media\\Fixed'" if IS_WINDOWS else
+               "  [paths]\n"
+               "  movies_root = '/mnt/media/Movies'\n"
+               "  tv_root     = '/mnt/media/TV'\n"
+               "  output_root = '/mnt/media/Fixed'\n"
+               "(copy MediaCleanup.example.toml; MKVToolNix is found on the PATH)")
         )
     try:
         with config_file.open("rb") as f:
@@ -761,23 +787,40 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         p = Path(value)
         return p if p.is_absolute() else (_SCRIPT_DIR / p)
 
-    mkvtoolnix_dir = as_path(required(tools, "tools", "mkvtoolnix_dir"))
+    if IS_WINDOWS or tools.get("mkvtoolnix_dir"):
+        mkvtoolnix_dir = as_path(required(tools, "tools", "mkvtoolnix_dir"))
+    else:
+        # Debian installs MKVToolNix with apt, so it is found on the PATH unless a folder is given.
+        found = shutil.which("mkvmerge")
+        mkvtoolnix_dir = Path(found).parent if found else Path("/usr/bin")
 
     def tool_exe(key: str, default_name: str) -> Path:
         v = tools.get(key)
-        return as_path(str(v)) if v else mkvtoolnix_dir / default_name
+        if v:
+            return as_path(str(v))
+        p = mkvtoolnix_dir / default_name
+        if not IS_WINDOWS and not p.exists():
+            on_path = shutil.which(default_name)
+            if on_path:
+                return Path(on_path)
+        return p
 
     # FileBot is optional: point at a guaranteed-nonexistent path when not configured
     # so all FILEBOT_EXE.exists() checks skip FileBot gracefully.
     fb = filebot.get("exe")
-    filebot_exe = as_path(str(fb)) if fb else (_SCRIPT_DIR / "__filebot_not_configured__")
+    if fb:
+        filebot_exe = as_path(str(fb))
+    else:
+        # On Linux FileBot is installed as a system command, so look for it; on Windows it must be configured.
+        on_path = None if IS_WINDOWS else shutil.which("filebot")
+        filebot_exe = Path(on_path) if on_path else (_SCRIPT_DIR / "__filebot_not_configured__")
 
     return Config(
         MKVTOOLNIX_DIR=mkvtoolnix_dir,
-        MKVMERGE_EXE=tool_exe("mkvmerge", "mkvmerge.exe"),
-        MKVPROPEDIT_EXE=tool_exe("mkvpropedit", "mkvpropedit.exe"),
-        MKVINFO_EXE=tool_exe("mkvinfo", "mkvinfo.exe"),
-        MKVEXTRACT_EXE=tool_exe("mkvextract", "mkvextract.exe"),
+        MKVMERGE_EXE=tool_exe("mkvmerge", exe_name("mkvmerge")),
+        MKVPROPEDIT_EXE=tool_exe("mkvpropedit", exe_name("mkvpropedit")),
+        MKVINFO_EXE=tool_exe("mkvinfo", exe_name("mkvinfo")),
+        MKVEXTRACT_EXE=tool_exe("mkvextract", exe_name("mkvextract")),
         FILEBOT_EXE=filebot_exe,
         MOVIES_ROOT=as_path(required(paths, "paths", "movies_root")),
         TV_ROOT=as_path(required(paths, "paths", "tv_root")),
@@ -1062,6 +1105,12 @@ def win_long_path(p: Path) -> str:
     return s
 
 
+def iter_mkv_files(folder: Path, recursive: bool = False) -> List[Path]:
+    """The .mkv files in a folder whatever the case of the extension (Linux file names are case-sensitive)."""
+    found = folder.rglob("*") if recursive else folder.glob("*")
+    return [p for p in found if p.suffix.lower() == ".mkv" and p.is_file()]
+
+
 def sanitize_filename(name: str) -> str:
     # Replace invalid Windows characters and normalize whitespace.
     name = re.sub(r'[<>:"/\\|?*]+', " ", name)
@@ -1178,7 +1227,7 @@ def run_filebot_rename_mkvs(mkvs: List[Path], dry_run: bool) -> List[Path]:
         return mkvs
 
     # Map renamed files back to originals by size (unique in nearly all cases for variant files).
-    candidates = list(out_dir.glob("*.mkv"))
+    candidates = iter_mkv_files(out_dir)
     by_size: Dict[int, List[Path]] = {}
     for c in candidates:
         try:
@@ -1290,7 +1339,7 @@ def run_filebot_rename_tv_mkv(mkv: Path, dry_run: bool) -> Path:
 
     # FileBot moved/renamed the file. Find the resulting MKV (best-effort).
     try:
-        candidates = sorted(out_dir.glob("*.mkv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates = sorted(iter_mkv_files(out_dir), key=lambda p: p.stat().st_mtime, reverse=True)
         if before_size is not None:
             candidates = [p for p in candidates if p.exists() and p.stat().st_size == before_size]
         if candidates:
@@ -2309,7 +2358,7 @@ def run_filebot_rename_final_mkv(
 
     # Find resulting MKV (best-effort: same size, most recent)
     try:
-        candidates = sorted(out_dir.glob("*.mkv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates = sorted(iter_mkv_files(out_dir), key=lambda p: p.stat().st_mtime, reverse=True)
         if before_size is not None:
             candidates = [p for p in candidates if p.exists() and p.stat().st_size == before_size]
         if candidates:
@@ -2412,7 +2461,7 @@ def scan_mkvs(root: Path) -> List[Path]:
         logging.warning("Root not found (skipping): %s", root)
         return []
     out: List[Path] = []
-    for p in root.rglob("*.mkv"):
+    for p in iter_mkv_files(root, recursive=True):
         # *.original.mkv are --inplace --backup safety copies — never process them.
         if p.is_file() and not p.name.lower().endswith(".original.mkv"):
             out.append(p)
@@ -6244,7 +6293,7 @@ def process_rename_one(
         new_path: Optional[Path] = None
         if not mkv.exists():
             try:
-                candidates = [p for p in out_dir.rglob("*.mkv")
+                candidates = [p for p in iter_mkv_files(out_dir, recursive=True)
                               if before_size is None or (p.exists() and p.stat().st_size == before_size)]
                 candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                 if candidates:
@@ -9235,7 +9284,7 @@ def _probe_tool(exe: Optional[Path], args: List[str], timeout: int = 30) -> str:
 
 def _find_optional_tool(name: str, root: Optional[Path] = None) -> Optional[Path]:
     """ffmpeg / x265: the project's own runtimes folder first, then the PATH."""
-    for rel in (f"runtimes/{name}/bin/{name}.exe", f"runtimes/{name}/{name}.exe"):
+    for rel in (f"runtimes/{name}/bin/{exe_name(name)}", f"runtimes/{name}/{exe_name(name)}"):
         p = (root or _SCRIPT_DIR) / rel
         if p.exists():
             return p
@@ -9271,8 +9320,12 @@ def print_version() -> int:
         rows.append(("FileBot", _probe_tool(fb, ["-version"], timeout=60) if fb.exists()
                      else "not installed (optional)"))
     else:
-        for name in ("mkvmerge", "mkvpropedit", "FileBot"):
-            rows.append((name, f"unknown - configuration not loaded ({config_problem})"))
+        # No usable config: look for the tools on the PATH instead, and say why once.
+        for name, exe_key in (("mkvmerge", "mkvmerge"), ("mkvpropedit", "mkvpropedit"), ("FileBot", "filebot")):
+            found = shutil.which(exe_key)
+            rows.append((name, _probe_tool(Path(found), ["-version"] if name == "FileBot" else ["--version"], 60)
+                         if found else "not found on the PATH"))
+        rows.append(("Config", _first_line(config_problem) or "not loaded"))
     for name, flag in (("ffmpeg", "-version"), ("x265", "--version")):
         exe = _find_optional_tool(name)
         rows.append((name, _probe_tool(exe, [flag]) if exe else "not installed (optional, not used yet)"))
@@ -9525,8 +9578,9 @@ def _flatten_toml(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def new_config_settings(root: Path) -> List[str]:
     """Settings the example config now has that the user's own MediaCleanup.toml lacks."""
+    example_file = root / ("MediaCleanup.example.toml" if IS_WINDOWS else "MediaCleanup.linux.example.toml")
     try:
-        example = _flatten_toml(tomllib.loads((root / "MediaCleanup.example.toml").read_text(encoding="utf-8")))
+        example = _flatten_toml(tomllib.loads(example_file.read_text(encoding="utf-8")))
         mine = _flatten_toml(tomllib.loads((root / "MediaCleanup.toml").read_text(encoding="utf-8")))
     except (OSError, tomllib.TOMLDecodeError):
         return []
@@ -9567,7 +9621,7 @@ def _print_plan(plan: UpdatePlan, backup_dir: Path) -> None:
         print("     Your versions are kept in the backup folder, but the release's replace them.")
     if plan.writes or plan.remove:
         print(f"\n  Everything replaced is copied to {backup_dir} first.")
-    print("  MediaCleanup.toml, logs\\ and runtimes\\ are never touched.")
+    print(f"  MediaCleanup.toml, logs{os.sep} and runtimes{os.sep} are never touched.")
 
 
 def _git(root: Path, *args: str, timeout: int = 120) -> CmdResult:
@@ -9992,6 +10046,36 @@ def _package_installed(name: str) -> Optional[str]:
         return None
 
 
+# Debian packages for the tools this one runs on. On Linux they come from apt, which needs
+# root, so the tool reports their state and prints the command instead of running it.
+_APT_PACKAGES = {"mkvtoolnix": "mkvtoolnix", "ffmpeg": "ffmpeg", "rich": "python3-rich", "pillow": "python3-pil"}
+
+
+def _apt_policy(package: str) -> Tuple[Optional[str], Optional[str]]:
+    """(installed, candidate) version of a package as apt sees it; (None, None) without apt."""
+    if shutil.which("apt-cache") is None:
+        return None, None
+    out = run_cmd(["apt-cache", "policy", package], 30).out or ""
+    got: Dict[str, Optional[str]] = {}
+    for key in ("Installed", "Candidate"):
+        m = re.search(rf"^\s*{key}:\s*(\S+)", out, re.M)
+        v = m.group(1) if m else None
+        got[key] = None if v in (None, "(none)") else v
+    return got["Installed"], got["Candidate"]
+
+
+def _deb_upstream(version: Optional[str]) -> Optional[str]:
+    """'1:9.0.2-1~deb13u1' -> '9.0.2': the part that compares with the tool's own version."""
+    m = re.match(r"(?:\d+:)?(\d+(?:\.\d+)*)", version or "")
+    return m.group(1) if m else None
+
+
+def _apt_command(*packages: str, upgrade: bool = False) -> str:
+    sudo = "" if getattr(os, "geteuid", lambda: 1)() == 0 else "sudo "
+    flag = " --only-upgrade" if upgrade else ""
+    return f"{sudo}apt-get update && {sudo}apt-get install -y{flag} {' '.join(packages)}"
+
+
 @dataclasses.dataclass
 class RuntimeStatus:
     key: str
@@ -10003,8 +10087,79 @@ class RuntimeStatus:
     extra: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+def _gather_runtime_status_linux(root: Path, cfg: Optional[Config]) -> List[RuntimeStatus]:
+    """The same report on Debian: versions come from apt, and nothing is downloaded."""
+    out: List[RuntimeStatus] = []
+    have_apt = shutil.which("apt-cache") is not None
+
+    def apt_row(st: RuntimeStatus, key: str, required: bool = False) -> None:
+        installed = st.installed if st.installed not in (None, "version unknown") else None
+        _, candidate = _apt_policy(_APT_PACKAGES[key])
+        st.latest = _deb_upstream(candidate)
+        if st.installed is None:
+            st.note = ("not installed" if required else "not installed (optional)") + f" - add it with: --install {key}"
+            if required:
+                st.extra["apt"] = _apt_command(_APT_PACKAGES[key])
+        elif installed is None:
+            st.note = "installed, but its version could not be read"
+        elif not have_apt:
+            st.note = "apt is not available here, so a newer version cannot be looked up"
+        elif st.latest and _numeric_version(st.latest) > _numeric_version(installed):
+            st.extra["apt"] = _apt_command(_APT_PACKAGES[key], upgrade=True)
+            st.note = "newer version in apt"
+        else:
+            st.note = "up to date (as far as apt knows)"
+
+    exe = cfg.MKVMERGE_EXE if cfg else Path(shutil.which("mkvmerge") or "/usr/bin/mkvmerge")
+    st = RuntimeStatus("mkvtoolnix", "MKVToolNix", installed=mkvtoolnix_installed(exe))
+    apt_row(st, "mkvtoolnix", required=True)
+    out.append(st)
+
+    fexe = _find_optional_tool("ffmpeg", root)
+    st = RuntimeStatus("ffmpeg", "ffmpeg")
+    if fexe is not None:
+        line = _first_line(run_cmd([str(fexe), "-version"], 30).out)
+        st.installed = parse_ffmpeg_version(line)["version"] or "version unknown"
+    apt_row(st, "ffmpeg")
+    out.append(st)
+
+    xexe = _find_optional_tool("x265", root)
+    st = RuntimeStatus("x265", "x265")
+    if xexe is None:
+        st.note = "not installed (optional); the ffmpeg package carries libx265"
+    else:
+        r = run_cmd([str(xexe), "--version"], 30)
+        m = re.search(r"version ([\w.+-]+)", (r.err or "") + (r.out or ""))
+        st.installed = m.group(1) if m else "version unknown"
+        st.note = "update it with its own package manager"
+    out.append(st)
+
+    fb = cfg.FILEBOT_EXE if cfg else Path(shutil.which("filebot") or "/usr/bin/filebot")
+    st = RuntimeStatus("filebot", "FileBot")
+    if fb.exists():
+        m = re.search(r"FileBot ([\d.]+)", _first_line(run_cmd([str(fb), "-version"], 90).out))
+        st.installed = m.group(1) if m else "version unknown"
+        st.note = "licensed software - update it with the way you installed it (https://www.filebot.net/)"
+    else:
+        st.note = "not installed (optional) - install.sh --with-filebot adds it; https://www.filebot.net/"
+    out.append(st)
+
+    st = RuntimeStatus("python", "Python", installed=platform.python_version())
+    st.note = ("below the minimum, 3.11 - " if sys.version_info < (3, 11) else "") + \
+              "not updated by this tool; it comes with the system (apt install python3)"
+    out.append(st)
+
+    for key, pkg in _PIP_PACKAGES.items():
+        st = RuntimeStatus(key, pkg, installed=_package_installed(pkg))
+        apt_row(st, key)
+        out.append(st)
+    return out
+
+
 def gather_runtime_status(root: Path, cfg: Optional[Config]) -> List[RuntimeStatus]:
     """Look at every tool this one runs on. Network lookups that fail leave 'latest' unknown."""
+    if not IS_WINDOWS:
+        return _gather_runtime_status_linux(root, cfg)
     runtimes = root / "runtimes"
     out: List[RuntimeStatus] = []
 
@@ -10218,6 +10373,15 @@ def run_update_runtimes(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_
     print("Checking the tools MediaCleanup runs on...\n")
     statuses = gather_runtime_status(root, _load_config_quietly(root))
     _print_runtime_table(statuses)
+    if not IS_WINDOWS:
+        commands = [(s.label, s.extra["apt"]) for s in statuses if s.extra.get("apt")]
+        if not commands:
+            print("\nNothing to update.")
+            return 0
+        print("\nOn Debian these are updated with apt, which needs root, so MediaCleanup only shows the command:")
+        for label, command in commands:
+            print(f"  {label:<12} {command}")
+        return 0
     todo = [s for s in statuses if s.action == "update"]
     if not todo:
         print("\nNothing to update.")
@@ -10249,13 +10413,18 @@ def run_install(tool: str, root: Path = _SCRIPT_DIR, dry_run: bool = False, assu
     if tool not in _INSTALLABLE:
         print(f"{tool!r} cannot be installed by this tool. It can install: {', '.join(_INSTALLABLE)}.")
         print("  FileBot is licensed and x265 is third-party (an ffmpeg build already carries libx265); "
-              "Python is installed with winget or from python.org.")
+              + ("Python is installed with winget or from python.org." if IS_WINDOWS
+                 else "Python comes with the system (apt install python3)."))
         return 1
     cfg = _load_config_quietly(root)
     st = next(s for s in gather_runtime_status(root, cfg) if s.key == tool)
     if st.installed:
         print(f"{st.label} {st.installed} is already installed. Use --update-runtimes to keep it current.")
         return 0
+    if not IS_WINDOWS:
+        print(f"On Debian {st.label} is installed with apt, which needs root, so run this yourself:")
+        print(f"  {_apt_command(_APT_PACKAGES[tool])}")
+        return 1
     if tool in _PIP_PACKAGES:
         print(f"Would install the {_PIP_PACKAGES[tool]} Python package with pip.")
     else:
@@ -10352,7 +10521,7 @@ def run_repair(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool
     def check_environment() -> None:
         # configuration
         cfg_path = root / "MediaCleanup.toml"
-        example = root / "MediaCleanup.example.toml"
+        example = root / ("MediaCleanup.example.toml" if IS_WINDOWS else "MediaCleanup.linux.example.toml")
         cfg: Optional[Config] = None
 
         def copy_example() -> str:
@@ -10374,10 +10543,14 @@ def run_repair(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool
                 note(f"setting not in your MediaCleanup.toml (the default applies): {line}")
 
         # MKVToolNix
-        exe = cfg.MKVMERGE_EXE if cfg else root / "runtimes" / "mkvtoolnix" / "mkvmerge.exe"
+        exe = cfg.MKVMERGE_EXE if cfg else (
+            root / "runtimes" / "mkvtoolnix" / "mkvmerge.exe" if IS_WINDOWS
+            else Path(shutil.which("mkvmerge") or "/usr/bin/mkvmerge"))
         runs = exe.exists() and run_cmd([str(exe), "--version"], 30).ok
         if runs:
             ok(f"MKVToolNix runs ({_first_line(run_cmd([str(exe), '--version'], 30).out)})")
+        elif not IS_WINDOWS:
+            bad(f"MKVToolNix is missing or does not run ({exe}); install it with: {_apt_command('mkvtoolnix')}")
         elif _inside(exe, root / "runtimes"):
             latest = mkvtoolnix_latest()
             if latest:
@@ -10389,7 +10562,9 @@ def run_repair(root: Path = _SCRIPT_DIR, dry_run: bool = False, assume_yes: bool
             bad(f"MKVToolNix is missing or does not run ({exe}); it is outside runtimes\\, so fix that install yourself")
 
         # optional tools are reported, never repaired
-        fb = cfg.FILEBOT_EXE if cfg else root / "runtimes" / "FileBot" / "filebot.exe"
+        fb = cfg.FILEBOT_EXE if cfg else (
+            root / "runtimes" / "FileBot" / "filebot.exe" if IS_WINDOWS
+            else Path(shutil.which("filebot") or "/usr/bin/filebot"))
         note("FileBot " + ("found" if fb.exists() else "not installed (optional)"))
         note("ffmpeg " + ("found" if _find_optional_tool("ffmpeg", root) else "not installed (optional, add with --install ffmpeg)"))
 
@@ -10447,6 +10622,7 @@ def report_pending_identity() -> int:
 
 
 def main() -> int:
+    ensure_utf8_locale()
     rc = _main()
     if _UPDATE_NOTICES:
         try:

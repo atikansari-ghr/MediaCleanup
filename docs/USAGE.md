@@ -30,13 +30,14 @@
 | Fix a wrong or missing name | [Renaming messy filenames](#renaming-messy-filenames) · [Troubleshooting](#troubleshooting) |
 | See my version, or check for a newer one | [Versions and updates](#versions-and-updates) |
 | Install on a new machine, update, repair, or update MKVToolNix | [Installing, updating and repairing](#installing-updating-and-repairing) |
+| Run it on Debian, in a VM or an LXC container | [Running on Linux](#running-on-linux) |
 
 ---
 
 ## Setup
 
-1. Install Python 3.11+ and [MKVToolNix](https://mkvtoolnix.download/).
-2. Copy `MediaCleanup.example.toml` to `MediaCleanup.toml` (same folder as the script) and edit the paths.
+1. Install Python 3.11+ and [MKVToolNix](https://mkvtoolnix.download/). On Linux, see [Running on Linux](#running-on-linux).
+2. Copy `MediaCleanup.example.toml` (`MediaCleanup.linux.example.toml` on Linux) to `MediaCleanup.toml` (same folder as the script) and edit the paths.
 3. Validate: `python MediaCleanup.py --self-check`
 
 All folder locations (media roots, tool paths) live in `MediaCleanup.toml` — the script has no hardcoded paths.
@@ -823,6 +824,128 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir D:\Tools\Medi
 
 > [!WARNING]
 > `irm … | iex` runs a script straight from the internet. If you would rather read it first, download `install.ps1` from the release, open it, and run it with `-File`. It is plain, commented PowerShell.
+
+### Running on Linux
+
+MediaCleanup runs on Debian 12 and 13, on a machine, in a VM or in an LXC container (tested on Debian 13 and in CI on Debian 12 and 13; Ubuntu 24.04 and newer use the same packages and should work, but are not tested). The tool is the same; only how the tools it runs on are installed differs. On Linux they come from `apt`, which needs root, so MediaCleanup finds them on the `PATH` and, when something needs installing or updating, **tells you the exact command rather than running it**: it never needs root to run.
+
+#### The installer
+
+```bash
+# from the latest release, as root (no account, no token)
+curl -fsSL https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.sh | sudo bash
+
+# or download it, read it, and run it with options
+sudo bash install.sh --dir /opt/MediaCleanup --movies /mnt/media/Movies --tv /mnt/media/TV --output /mnt/media/Fixed
+```
+
+| Option | Meaning |
+|---|---|
+| `--dir DIR` | Where to install (default `/opt/MediaCleanup`). |
+| `--tag TAG` | A specific release such as `v1.13.0` (default: the latest). |
+| `--movies DIR` `--tv DIR` `--output DIR` | Your folders, written into the first config. |
+| `--with-ffmpeg` | Also install ffmpeg (optional). |
+| `--no-link` | Do not create the `mediacleanup` command in `/usr/local/bin`. |
+| `--skip-packages` | Do not run `apt` (Python, MKVToolNix and the packages must already be there). |
+| `--from-dir DIR` | Install from a local checkout (developers, offline use). |
+
+- It installs `python3`, `mkvtoolnix`, `python3-rich` and `python3-pil` with `apt`, unpacks the release, **verifies every file against the hashes GitHub published for it** (the tool's own `--repair --files-only`), writes `MediaCleanup.toml` from `MediaCleanup.linux.example.toml` (readable only by its owner, because it will hold your API keys) and adds a `mediacleanup` command.
+- **Re-running it updates.** On an existing install it runs `--update` and never touches `MediaCleanup.toml`.
+- If you ran it with `sudo` from a normal account, that account owns the install, so `--update`, the logs and the ledgers work without root afterwards.
+- **FileBot is never installed by the script.** It is licensed software; install it the way its website describes and the tool finds `filebot` on the `PATH`. See [FileBot on Linux](#filebot-on-linux).
+
+#### What differs from Windows
+
+| | Windows | Linux |
+|---|---|---|
+| Tools | Portable copies in `runtimes\`, downloaded and checksum-verified by the tool | `apt` packages found on the `PATH` (or a folder you set in `[tools]`) |
+| `--update-runtimes` | Downloads and installs newer versions | Compares with what `apt` offers and **prints** the command to run |
+| `--install mkvtoolnix` / `ffmpeg` / `rich` / `pillow` | Downloads or runs `pip` | **Prints** the `apt-get install` command and exits `1` (nothing was installed) |
+| `--repair` | Restores files, folders, config and a missing MKVToolNix | Restores files, folders and config; a missing MKVToolNix is reported with the `apt` command |
+| FileBot | Set `[filebot] exe` | Found on the `PATH` when installed; set `exe` only for a copy elsewhere |
+| Config example | `MediaCleanup.example.toml` | `MediaCleanup.linux.example.toml` |
+| File names | Characters Windows forbids are removed | **The same**, so a library renamed on Linux still opens from Windows over a share |
+
+`--update` and `--check-update` are identical on both: every file is verified against GitHub's published hashes.
+
+> [!NOTE]
+> Debian's own MKVToolNix is older than the vendor's current release (Debian 13 has 92.0 while the latest is 103.0). It is all the tool needs. For the newest version the MKVToolNix project publishes a signed apt repository for Debian and Ubuntu: <https://mkvtoolnix.download/downloads.html>.
+
+#### Containers and virtual machines
+
+| Need | Detail |
+|---|---|
+| OS | Debian 12 or 13 (Ubuntu 24.04+ untested); amd64 or arm64. Python 3.11 or newer (Debian 12 ships 3.11, Debian 13 ships 3.13). |
+| Library access | Mount your media into the container (bind mount, NFS or SMB). The user running the tool needs **write** permission: `mkvpropedit` edits files in place and a remux writes a new file. |
+| Unprivileged LXC | Host user ids map to high numbers inside the container, so a bind mount must be owned by the mapped id or be group-writable, or every write fails with "permission denied". An SMB share cannot be mounted from inside it at all; see [Network shares in an unprivileged LXC](#network-shares-in-an-unprivileged-lxc). |
+| Disk space | A remux writes a new file next to the output, so the output folder needs free space about the size of your largest MKV. |
+| Memory | 512 MB is enough for MKVToolNix. FileBot runs on Java, so give it about 1 GB. |
+| Locale | Nothing to set. A container's shell often has the plain `C` locale, under which the programs the tool starts cannot open file names with accents (`Película.mkv` is truncated at the first non-ASCII byte). The tool gives them a UTF-8 locale itself, unless you chose one. |
+| Network | Outbound HTTPS to the services you use (TMDB, OMDb, fanart.tv, OpenSubtitles, GitHub) and DNS. No inbound ports, no GUI. |
+| File names | Linux file names are case-sensitive; the tool treats `.MKV` and `.mkv` alike, so nothing is missed. |
+
+#### Network shares in an unprivileged LXC
+
+Inside an unprivileged container `mount -t cifs` fails with `mount error(1): Operation not permitted`; that is how Proxmox isolates the container, not a fault in MediaCleanup. Mount the share **on the Proxmox host** and hand the folder to the container as a bind mount. Run this on the host (replace the container id, the share and the credentials):
+
+```bash
+apt install -y cifs-utils
+
+# credentials file, readable by root only (create it yourself; never put the password on a command line)
+nano /root/.smb-media          # two lines: username=...  and  password=...
+chmod 600 /root/.smb-media
+
+mkdir -p /mnt/media-smb
+echo '//NAS-ADDRESS/Media /mnt/media-smb cifs credentials=/root/.smb-media,uid=100000,gid=100000,file_mode=0664,dir_mode=0775,iocharset=utf8,vers=3.0,_netdev,nofail 0 0' >> /etc/fstab
+systemctl daemon-reload && mount /mnt/media-smb
+
+pct set CTID -mp0 /mnt/media-smb,mp=/mnt/media
+pct reboot CTID
+```
+
+`uid=100000,gid=100000` is the container's root user as the host sees it (the first id of the container's mapping, `0 100000 65536` by default); it is what lets the tool write. Then point `[paths]` at folders under `/mnt/media`. Keep `--backup` on when you use `--inplace`: the share is your real library.
+
+An NFS export works the same way (mount it on the host, bind it in). A *privileged* container can mount shares itself, but that weakens the container's isolation and is not recommended.
+
+#### FileBot on Linux
+
+FileBot is optional and licensed, so MediaCleanup never installs it. The vendor's `.deb` package bundles its own Java, so nothing else is needed:
+
+```bash
+# download the current .deb from https://www.filebot.net/ (choose Linux, amd64 or arm64), then, as root:
+apt install ./FileBot_X.Y.Z_amd64.deb
+filebot -version
+```
+
+It installs to `/usr/share/filebot` with `filebot` on the `PATH`, and MediaCleanup finds it there with no `[filebot] exe` setting. FileBot's licence is activated **per user** (it is kept in that user's `~/.filebot/`), so activate it as the account that runs MediaCleanup:
+
+```bash
+filebot --license /path/to/your-licence.psm
+```
+
+MediaCleanup does not check the licence; an unlicensed FileBot is limited by FileBot itself. `mediacleanup --version` shows whether FileBot was found.
+
+#### Configuration
+
+The keys are the same as on Windows; only the paths change, and `[tools]` can be left out:
+
+```toml
+[paths]
+movies_root = '/mnt/media/Movies'
+tv_root     = '/mnt/media/TV'
+output_root = '/mnt/media/Fixed'
+
+[coverart]                  # the same API keys as on Windows
+tmdb_api_key = ""
+```
+
+#### Running on a schedule
+
+`mediacleanup --dry-run` is safe to run from `cron` or a systemd timer to see what a nightly run would change. For example, a preview at 03:00 written to a log:
+
+```bash
+0 3 * * *  /usr/local/bin/mediacleanup --dry-run --log-file /opt/MediaCleanup/logs/nightly.log
+```
 
 ---
 

@@ -55,3 +55,7 @@ exe = 'runtimes\FileBot\filebot.exe'
 Prefer system-wide installs instead? Point the TOML at any absolute path
 (e.g. `'C:\Program Files\MKVToolNix'`) — relative paths resolve against the
 script folder, absolute paths are used as-is.
+
+## On Linux
+
+Nothing goes in this folder on Debian or Ubuntu. MKVToolNix, ffmpeg, rich and Pillow are `apt` packages found on the `PATH`, and a FileBot you installed is found there too. `python3 MediaCleanup.py --update-runtimes` reports what `apt` offers and prints the command; it never downloads into `runtimes/`. See [Running on Linux](../docs/USAGE.md#running-on-linux).

@@ -1,0 +1,95 @@
+# MediaCleanup configuration - TEMPLATE for Linux (Debian, Ubuntu, a VM or an LXC container)
+#
+# Setup (install.sh does this for you):
+#   1. Copy this file to MediaCleanup.toml (same folder as MediaCleanup.py).
+#   2. Edit the three paths below.
+#   3. (Optional) Add API keys under [coverart] to identify titles and fetch posters.
+#
+# MediaCleanup.toml is git-ignored on purpose - it holds your private API keys.
+# On Linux the tools are installed with apt and found on the PATH, so there is
+# nothing to point at. The settings after [paths] are the same as on Windows.
+
+[tools]
+# Leave mkvtoolnix_dir out to use the MKVToolNix that apt installed (found on the PATH).
+# Only set it for a copy somewhere else, for example an extracted AppImage:
+# mkvtoolnix_dir = '/opt/mkvtoolnix/usr/bin'
+
+[filebot]
+# Optional. FileBot is found on the PATH when it is installed; set exe only for a copy
+# somewhere else. Without FileBot, films are still identified and named, but TV episodes
+# are renamed only through FileBot.
+# exe = '/opt/filebot/filebot.sh'
+db = "TheMovieDB"
+
+[paths]
+movies_root = '/mnt/media/Movies'   # source movies (scanned recursively)
+tv_root     = '/mnt/media/TV'       # source TV episodes
+output_root = '/mnt/media/Fixed'    # remuxed output (mirrors source structure)
+
+[naming]
+# Extra filename prefixes to strip before the title is read.
+#
+# Downloads sometimes arrive stamped with the name of the site or tool that
+# produced them ('SomeDistributor.The.Film.2024.1080p.mkv'). Prefixes that look
+# like a web address ('www.something.net - ...') are removed automatically; add
+# any others your own files carry here.
+#   strip_prefixes = ["SomeDistributor", "AnotherName"]
+strip_prefixes = []
+
+# When no database knows a title (TMDB, OMDb for films; TheTVDB, TMDB, TVmaze for
+# shows), name the file and clean its tags from facts in the file itself — title and
+# year from its filename, resolution/codec/languages from the video — and report it
+# LOCAL. Nothing is invented (no id, poster or description). Set false (or pass
+# --no-local-name) to leave such files exactly as they are.
+local_fallback = true
+
+[updates]
+# Once a day, in the background, look for a newer published release and print a
+# one-line notice at the end of a run. Nothing is downloaded or installed.
+# --check-update always works; --no-update-check skips it for one run.
+check = true
+
+[languages]
+# Audio languages to KEEP — everything else is stripped during remux.
+# The list ORDER = audio track order in the output file.
+# Accepts ISO 639-2 codes ("hin"), ISO 639-1 ("hi"), or English names ("Hindi").
+# Examples:  ["spa", "eng"]   ["Japanese", "English"]   ["hin", "tam", "eng"]
+targets = ["hin", "eng", "tel", "kor"]
+
+# Work out what tracks tagged "und" actually are (default true). Some releases
+# strip every track's language metadata; without this they look like they have
+# no audio in your target languages at all.
+#   Audio     — a single unlabelled track takes the title's original language.
+#   Subtitles — text tracks are identified from their own text.
+# Tracks that cannot be identified confidently keep their "und" tag.
+# Turn off for a single run with --no-lang-detect.
+detect_undetermined = true
+
+[coverart]
+# API keys for the --coverart mode. All optional — an empty value disables that
+# source. Local poster files (poster.jpg/cover.jpg/folder.jpg) always work.
+# Source priority: local file -> TMDB -> fanart.tv -> OMDb.
+#   TMDB:      https://www.themoviedb.org/settings/api        (free signup)
+#   fanart.tv: https://fanart.tv/get-an-api-key/              (free project key)
+#   OMDb:      https://www.omdbapi.com/apikey.aspx            (free, 1000 req/day)
+tmdb_api_key     = ""
+fanarttv_api_key = ""
+omdb_api_key     = ""
+
+[subtitles]
+# OpenSubtitles.com settings for the --subtitles mode (sidecar .srt download).
+#
+# ONLY api_key IS REQUIRED. On its own it can search without limit and download
+# 5 subtitles per IP address per day. Your own consumer key:
+#   https://www.opensubtitles.com/en/consumers          (do not share it)
+#
+# username + password are OPTIONAL. They log you in, which raises the daily download
+# limit (free account ~20, VIP up to 1000). The username is your opensubtitles.com
+# USERNAME - NOT your email address; an email is refused. If the login fails the run
+# carries on with the API key alone and tells you why.
+api_key  = ""
+username = ""
+password = ""
+# Languages to download (ISO 639-1). A single language saves as '<movie>.srt';
+# extra languages get a suffix like '<movie>.hin.srt'.
+languages = ["en"]

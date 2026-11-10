@@ -33,3 +33,33 @@ jobs:
           python MediaCleanup.py --help
       - name: Tests (no config, no network, no media needed)
         run: python -m unittest discover -s tests -v
+
+  debian:
+    name: Tests and installer (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13"]
+    steps:
+      - name: Install git, Python and certificates
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git python3 ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile
+        run: python3 -m py_compile MediaCleanup.py
+      - name: Tests (no config, no network, no media needed)
+        run: python3 -m unittest discover -s tests -v
+      - name: Installer, from this checkout
+        run: |
+          bash install.sh --from-dir "$GITHUB_WORKSPACE" --dir /opt/MediaCleanup
+          mediacleanup --version
+          mediacleanup --update-runtimes --dry-run
+      - name: A run with no config says what to do
+        run: |
+          mv /opt/MediaCleanup/MediaCleanup.toml /opt/MediaCleanup/MediaCleanup.toml.bak
+          mediacleanup --dry-run 2>&1 | grep -i "config file not found" 

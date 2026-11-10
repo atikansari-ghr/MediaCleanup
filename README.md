@@ -5,7 +5,7 @@
 **Clean, merge, tag and name your MKV library — and never guess a title.**
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Debian%20Linux-0078D6)
 ![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)
 ![MKVToolNix](https://img.shields.io/badge/built%20on-MKVToolNix-ff8800)
 ![FileBot](https://img.shields.io/badge/renaming-FileBot-6b4fbb)
@@ -23,7 +23,7 @@
 
 <br>
 
-Windows MKV media tool built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding. Point it at a folder; it hands back a library that Plex, Jellyfin, Kodi and VLC all read the same way.
+MKV media tool for **Windows and Debian-family Linux** (a PC, a VM or an LXC container), built on **MKVToolNix**, with optional **FileBot** renaming and **cover art** embedding. Point it at a folder; it hands back a library that Plex, Jellyfin, Kodi and VLC all read the same way.
 
 > [!TIP]
 > New here? Run `python MediaCleanup.py --dry-run --verbose` first. Every mode previews exactly what it would do — names, tags, commands — and writes nothing.
@@ -57,15 +57,26 @@ Plus standalone maintenance modes, each runnable on its own:
 
 ### One command
 
+**Windows** (PowerShell):
+
 ```powershell
 irm https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.ps1 | iex
 ```
 
 The installer finds or installs Python, unpacks the release, verifies every file against the hashes GitHub published for it, fetches MKVToolNix (checksum-verified), writes a first config from your answers and creates a launcher. Prefer to read it first? Download `install.ps1` from the release and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It needs no account, no token and no administrator rights. See [the installer](docs/USAGE.md#the-installer) for every option.
 
+**Debian (and Ubuntu), a VM or an LXC container** (as root):
+
+```bash
+curl -fsSL https://github.com/atikansari-ghr/MediaCleanup/releases/latest/download/install.sh | sudo bash
+```
+
+It installs what the tool runs on with `apt` (Python, MKVToolNix, rich, Pillow), unpacks the release into `/opt/MediaCleanup`, verifies every file against GitHub's published hashes, writes a first config and adds a `mediacleanup` command. Details, container notes and every option: [Running on Linux](docs/USAGE.md#running-on-linux).
+
 ### By hand
 
 ```bat
+:: Windows
 :: 1. Get the code
 git clone https://github.com/atikansari-ghr/MediaCleanup.git && cd MediaCleanup
 
@@ -86,8 +97,17 @@ python MediaCleanup.py --dry-run --verbose
 python MediaCleanup.py
 ```
 
+```bash
+# Debian / Ubuntu
+sudo apt install python3 mkvtoolnix python3-rich python3-pil git
+git clone https://github.com/atikansari-ghr/MediaCleanup.git && cd MediaCleanup
+cp MediaCleanup.linux.example.toml MediaCleanup.toml && nano MediaCleanup.toml
+python3 MediaCleanup.py --self-check
+python3 MediaCleanup.py --dry-run --verbose
+```
+
 > [!NOTE]
-> All paths and API keys live in `MediaCleanup.toml`. The script has no hardcoded locations, and relative paths resolve against the script folder, so a cloned project with tools in `runtimes\` works wherever it sits.
+> All paths and API keys live in `MediaCleanup.toml`. The script has no hardcoded locations, and relative paths resolve against the script folder, so a cloned project works wherever it sits. On Linux the tools are found on the `PATH`, so there is nothing to point at.
 
 ## 🧩 How it works
 
@@ -136,7 +156,7 @@ The numbers are saved to `logs\pending_identity.csv` and read back, never recomp
 <img src="docs/images/lifecycle.svg" alt="Install, check, update, repair and runtime updates, with a matrix of what each command may change" width="100%">
 </div>
 
-The tool looks after itself. `--check-update` compares your version with the latest release (a one-line notice also appears at the end of a run, at most once a day, never delaying it); `--update` installs it with **every file verified against GitHub's published hashes**, a backup of whatever it replaces, and automatic rollback if anything fails; `--repair` restores a damaged install; `--update-runtimes` keeps MKVToolNix, ffmpeg and the pip packages current. Your `MediaCleanup.toml`, `logs\` and ledgers are **never** touched. Details in the [usage guide](docs/USAGE.md#installing-updating-and-repairing).
+The tool looks after itself. `--check-update` compares your version with the latest release (a one-line notice also appears at the end of a run, at most once a day, never delaying it); `--update` installs it with **every file verified against GitHub's published hashes**, a backup of whatever it replaces, and automatic rollback if anything fails; `--repair` restores a damaged install; `--update-runtimes` keeps MKVToolNix, ffmpeg and the pip packages current (on Linux those come from `apt`, which needs root, so it reports and prints the command instead of running it). Your `MediaCleanup.toml`, `logs\` and ledgers are **never** touched. Details in the [usage guide](docs/USAGE.md#installing-updating-and-repairing).
 
 ## 🧭 Which command do I need?
 
@@ -246,13 +266,13 @@ LOCAL show:   Show Name - S01E02 - 1080p.x264 - [English].mkv                   
 
 | Requirement | Notes |
 |---|---|
-| Windows 10/11 | Uses Windows long-path handling; paths are Windows-style |
-| Python 3.11+ | Standard library only — no pip installs required |
-| [MKVToolNix](https://mkvtoolnix.download/) | `mkvmerge` + `mkvpropedit` (+ `mkvextract` for IMDB tag reads) |
-| [FileBot](https://www.filebot.net/) | *Optional* — canonical renaming via TheMovieDB/TheTVDB/TVmaze |
+| Windows 10/11, or Debian 12+ (Ubuntu 24.04+ should work) | Windows uses long-path handling and portable tools in `runtimes\`. Linux uses `apt` packages found on the `PATH`; see [Running on Linux](docs/USAGE.md#running-on-linux) |
+| Python 3.11+ | Standard library only — no pip installs required (Debian 12 ships 3.11, Debian 13 ships 3.13) |
+| [MKVToolNix](https://mkvtoolnix.download/) | `mkvmerge` + `mkvpropedit` (+ `mkvextract` for IMDB tag reads). Linux: `apt install mkvtoolnix` |
+| [FileBot](https://www.filebot.net/) | *Optional* — canonical renaming via TheMovieDB/TheTVDB/TVmaze. Licensed; install it the way its site describes |
 | API keys | *Optional* — TMDB (primary), OMDb (second film source), fanart.tv (posters), OpenSubtitles. See [CONFIGURATION](docs/CONFIGURATION.md) |
-| [rich](https://pypi.org/project/rich/) | *Optional (recommended)* — colored output + summary tables (`pip install rich`) |
-| [Pillow](https://pypi.org/project/pillow/) | *Optional* — downscales oversized local posters for `--coverart` |
+| [rich](https://pypi.org/project/rich/) | *Optional (recommended)* — colored output + summary tables (`pip install rich`, or `apt install python3-rich`) |
+| [Pillow](https://pypi.org/project/pillow/) | *Optional* — downscales oversized local posters for `--coverart` (`apt install python3-pil` on Debian) |
 
 ## 📁 Folder layout
 
@@ -261,8 +281,10 @@ Runtime tools live inside the project — drop them into the committed skeleton 
 ```
 MediaCleanup\
 ├── MediaCleanup.py              ← the tool
-├── install.ps1                  ← one-command installer (also attached to each release)
-├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit
+├── install.ps1                  ← Windows one-command installer (also attached to each release)
+├── install.sh                   ← Debian/Ubuntu one-command installer (also attached to each release)
+├── MediaCleanup.example.toml    ← copy to MediaCleanup.toml and edit (Windows)
+├── MediaCleanup.linux.example.toml  ← the same for Linux (tools are found on the PATH)
 ├── MediaCleanup.toml            ← your config + API keys (git-ignored)
 ├── tests\                       ← offline tests: python -m unittest discover -s tests
 ├── runtimes\                    ← portable tools (binaries git-ignored)
